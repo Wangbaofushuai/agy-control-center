@@ -1,0 +1,15 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "agy-control-center",
+  "displayName": "Control Center",
+  "version": "1.0.0",
+  "description": "Manage global and project-scoped MCP servers and Git-based Agent Skills with OpenChamber-style JSON import, repo scanning, and dual-mode UI.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "打开 MCP 与技能控制中心面板",
+    "将一段 MCP JSON 配置导入到全局或当前项目",
+    "扫描一个 Git Skill 仓库并安装指定技能"
+  ],
+  "license": "MIT",
+  "keywords": ["mcp", "skills", "catalog", "manager", "control-center"]
+}

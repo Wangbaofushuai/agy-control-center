@@ -1,3 +1,14 @@
-# Agent local rules (excluded from Git)
+# Agent local rules & workspace runtime customizations (excluded from Git)
 AGENTS.md
 Agents.md
+.agents/
+
+# Local runtime state, cloned skill repo cache & local service env
+data/
+.sm.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Antigravity 控制中心</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <div class="panel-shell">
+    <!-- Top Header & Mode Switcher -->
+    <header class="panel-header">
+      <div class="header-row">
+        <div class="brand">
+          <img src="../icons/icon-48.png" alt="" width="24" height="24" class="brand-icon" />
+          <div>
+            <div class="brand-title">Antigravity 控制中心</div>
+            <div class="brand-status" id="connectionSubtitle">零后端模式 · 填入对话即可生效</div>
+          </div>
+        </div>
+        <button type="button" class="icon-btn" id="btnTheme" title="切换主题" aria-label="切换主题">◐</button>
+      </div>
+
+      <div class="mode-switch" role="tablist" aria-label="运行模式">
+        <button type="button" class="mode-btn active" data-mode="bridge">⚡ 零后端（对话桥接）</button>
+        <button type="button" class="mode-btn" data-mode="backend">🔌 直连后端</button>
+      </div>
+
+      <nav class="tab-bar" role="tablist">
+        <button type="button" class="tab-btn active" data-tab="mcp">MCP</button>
+        <button type="button" class="tab-btn" data-tab="catalog">技能目录</button>
+        <button type="button" class="tab-btn" data-tab="installed">已安装</button>
+        <button type="button" class="tab-btn" data-tab="settings">连接</button>
+      </nav>
+    </header>
+
+    <!-- Main Scrollable Body -->
+    <main class="panel-main">
+      <!-- TAB 1: MCP -->
+      <section class="tab-panel active" id="tab-mcp">
+        <div class="toolbar-row">
+          <button type="button" class="btn btn-primary btn-sm" id="btnNewMcp">+ 新建 MCP</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btnOpenImportJson">从 JSON 导入</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btnOpenCacheDlg">清理缓存</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btnInspectState" title="让当前对话 Agent 汇总服务器现状">盘点现状</button>
+        </div>
+
+        <div id="mcpScopeBar" class="chip-scroll"></div>
+        <div id="mcpList" class="card-stack"></div>
+
+        <!-- Inline MCP Editor Drawer -->
+        <div id="mcpEditorBox" class="editor-card hidden">
+          <div class="editor-head">
+            <strong id="mcpEditorTitle">新建 MCP 服务器</strong>
+            <button type="button" class="btn btn-ghost btn-sm" id="btnEditorImportJson">JSON 导入</button>
+          </div>
+
+          <div class="field">
+            <label for="fMcpName">服务器名称</label>
+            <input type="text" id="fMcpName" class="input" placeholder="postgres" />
+          </div>
+
+          <div class="field">
+            <label for="fMcpScope">生效范围</label>
+            <select id="fMcpScope" class="select"></select>
+          </div>
+
+          <div class="field hidden" id="fMcpCustomProjectWrap">
+            <label for="fMcpCustomProject">项目路径（留空表示当前项目）</label>
+            <input type="text" id="fMcpCustomProject" class="input mono" placeholder="/root/KaiFa/my-project" />
+          </div>
+
+          <label class="check-row">
+            <input type="checkbox" id="fMcpEnabled" checked />
+            <span>启用服务器</span>
+          </label>
+
+          <div class="segmented-sm">
+            <button type="button" class="seg-btn active" data-transport="stdio">&gt;_ 命令 (Stdio)</button>
+            <button type="button" class="seg-btn" data-transport="http">🌐 链接 (HTTP)</button>
+          </div>
+
+          <div id="fStdioWrap" class="field-group">
+            <div class="field">
+              <label for="fMcpCommand">启动命令（每行一个参数，或粘贴整行命令）</label>
+              <textarea id="fMcpCommand" class="textarea mono" rows="4" placeholder="npx&#10;-y&#10;@modelcontextprotocol/server-postgres"></textarea>
+            </div>
+            <div class="field">
+              <div class="field-row-between">
+                <label>环境变量 (env)</label>
+                <button type="button" class="btn btn-ghost btn-xs" id="btnAddEnvRow">+ 添加</button>
+              </div>
+              <div id="fEnvList" class="kv-stack"></div>
+            </div>
+          </div>
+
+          <div id="fHttpWrap" class="field-group hidden">
+            <div class="field">
+              <label for="fMcpUrl">远程地址 (serverUrl · Streamable HTTP)</label>
+              <input type="url" id="fMcpUrl" class="input mono" placeholder="https://api.example.com/mcp" />
+            </div>
+            <div class="field">
+              <div class="field-row-between">
+                <label>请求头 (headers)</label>
+                <button type="button" class="btn btn-ghost btn-xs" id="btnAddHeaderRow">+ 添加</button>
+              </div>
+              <div id="fHeaderList" class="kv-stack"></div>
+            </div>
+          </div>
+
+          <details class="details-box">
+            <summary>高级选项（cwd / timeoutSeconds / 工具过滤）</summary>
+            <div class="details-body">
+              <div class="field">
+                <label for="fMcpCwd">工作目录 (cwd)</label>
+                <input type="text" id="fMcpCwd" class="input mono" placeholder="/path/to/dir" />
+              </div>
+              <div class="field">
+                <label for="fMcpTimeout">超时秒数 (timeoutSeconds)</label>
+                <input type="number" id="fMcpTimeout" class="input" placeholder="180" />
+              </div>
+              <div class="field">
+                <label for="fMcpEnabledTools">允许工具白名单 (逗号分隔)</label>
+                <input type="text" id="fMcpEnabledTools" class="input mono" placeholder="read_query, list_tables" />
+              </div>
+              <div class="field">
+                <label for="fMcpDisabledTools">隐藏工具黑名单 (逗号分隔)</label>
+                <input type="text" id="fMcpDisabledTools" class="input mono" placeholder="drop_table" />
+              </div>
+            </div>
+          </details>
+
+          <div class="editor-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="btnCancelMcp">取消</button>
+            <button type="button" class="btn btn-secondary btn-sm hidden" id="btnSaveDraftOnly">仅存草稿</button>
+            <button type="button" class="btn btn-primary btn-sm" id="btnSubmitMcp">填入对话应用</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: SKILL CATALOG -->
+      <section class="tab-panel" id="tab-catalog">
+        <div class="toolbar-row">
+          <input type="search" id="catalogSearch" class="input flex-1" placeholder="在已扫描来源中搜索技能..." />
+          <button type="button" class="btn btn-primary btn-sm" id="btnAddCatalog">+ 仓库</button>
+        </div>
+
+        <div id="catalogGrid" class="catalog-grid"></div>
+
+        <div id="catalogErrBox" class="error-box hidden">
+          <strong>目录错误</strong>
+          <div id="catalogErrMsg"></div>
+        </div>
+
+        <div class="section-head">
+          <span id="catalogListTitle">点击仓库卡片扫描 SKILL.md</span>
+          <div class="inline-actions">
+            <button type="button" class="btn btn-primary btn-xs hidden" id="btnBatchInstall">安装已选 (0)</button>
+            <button type="button" class="btn btn-ghost btn-xs" id="btnRescanCatalog">刷新扫描</button>
+          </div>
+        </div>
+
+        <label class="check-row hidden" id="selectAllWrap">
+          <input type="checkbox" id="cbSelectAllSkills" />
+          <span>全选当前来源</span>
+        </label>
+
+        <div id="catalogSkillsList" class="card-stack"></div>
+      </section>
+
+      <!-- TAB 3: INSTALLED SKILLS / DRAFTS -->
+      <section class="tab-panel" id="tab-installed">
+        <div id="installedBridgeHint" class="notice-box hidden">
+          <strong>零后端模式说明</strong>
+          <p>零后端模式下插件无法直接读取服务器硬盘上的已装技能。你可以点下方按钮让当前 Antigravity 对话里的 Agent 列出全部已装技能，或在「连接」页切换为直连后端查看实时列表。</p>
+          <button type="button" class="btn btn-primary btn-sm" id="btnAskAgentListSkills">填入指令让 Agent 列出已装技能</button>
+        </div>
+
+        <div id="installedBackendWrap">
+          <div class="toolbar-row">
+            <div id="installedScopeBar" class="chip-scroll flex-1"></div>
+            <button type="button" class="btn btn-ghost btn-sm" id="btnRefreshInstalled">刷新</button>
+          </div>
+          <div id="installedSkillsList" class="card-stack"></div>
+        </div>
+      </section>
+
+      <!-- TAB 4: CONNECTION & SETTINGS -->
+      <section class="tab-panel" id="tab-settings">
+        <div class="card">
+          <h3>服务器直连配置（可选）</h3>
+          <p class="muted">发给朋友时无需填写，默认「零后端模式」即可直接解析 MCP JSON、扫描 GitHub 技能仓库并填入 Antigravity 对话执行。若服务器已运行 <code>./start.sh</code>，填写地址后可切换为双向实时管理。</p>
+
+          <div class="field">
+            <label for="sBackendUrl">后端服务器地址</label>
+            <input type="url" id="sBackendUrl" class="input mono" placeholder="http://你的服务器IP:8787" />
+          </div>
+
+          <div class="field">
+            <label for="sBackendToken">访问令牌 Token（未设置可留空）</label>
+            <input type="password" id="sBackendToken" class="input mono" placeholder="可选" autocomplete="off" />
+          </div>
+
+          <div class="toolbar-row">
+            <button type="button" class="btn btn-secondary btn-sm" id="btnTestBackend">测试连接</button>
+            <button type="button" class="btn btn-primary btn-sm" id="btnSaveBackend">保存并启用直连</button>
+          </div>
+          <div id="backendTestResult" class="status-note hidden"></div>
+        </div>
+
+        <div class="card">
+          <h3>零后端模式默认项目路径</h3>
+          <p class="muted">当在零后端模式下选择「项目作用域」时默认填入的项目目录（留空则提示 Agent 使用当前工作区）。</p>
+          <div class="field">
+            <label for="sDefaultProject">默认项目路径（可选）</label>
+            <input type="text" id="sDefaultProject" class="input mono" placeholder="/path/to/your-project" />
+          </div>
+          <div class="field">
+            <label for="sGithubToken">GitHub Token（可选，提高匿名限流或扫描私有库）</label>
+            <input type="password" id="sGithubToken" class="input mono" placeholder="ghp_xxx（仅存本机浏览器）" autocomplete="off" />
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm" id="btnSaveLocalPrefs">保存本地偏好</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- DIALOG: Import MCP JSON -->
+  <dialog id="dlgImportJson" class="modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <strong>导入 MCP JSON 片段</strong>
+        <button type="button" class="icon-btn" data-close="dlgImportJson">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="muted">兼容 Antigravity / Claude / Cursor（<code>mcpServers</code>）、OpenCode（<code>mcp</code>）或单服务器对象。</p>
+        <textarea id="importJsonInput" class="textarea mono" rows="8" placeholder='{"mcpServers":{"postgres":{"command":"npx","args":["-y","@modelcontextprotocol/server-postgres"]}}}'></textarea>
+        <div class="toolbar-row">
+          <button type="button" class="btn btn-secondary btn-xs" id="btnPasteJsonClip">从剪贴板粘贴</button>
+          <button type="button" class="btn btn-ghost btn-xs" id="btnParseJsonNow">解析预览</button>
+        </div>
+        <div id="importPreviewBox" class="preview-box hidden"></div>
+        <div class="field hidden" id="importScopeWrap">
+          <label for="importScopeSelect">批量应用目标作用域</label>
+          <select id="importScopeSelect" class="select"></select>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-secondary btn-sm" data-close="dlgImportJson">取消</button>
+        <button type="button" class="btn btn-secondary btn-sm hidden" id="btnBatchApplyJson">直接应用全部</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btnFillParsedForm">填充到表单</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- DIALOG: Add Skill Catalog -->
+  <dialog id="dlgAddCatalog" class="modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <strong>添加技能仓库</strong>
+        <button type="button" class="icon-btn" data-close="dlgAddCatalog">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label for="cNameInput">目录名称（可选）</label>
+          <input type="text" id="cNameInput" class="input" placeholder="Team Skills" />
+        </div>
+        <div class="field">
+          <label for="cRepoInput">仓库地址</label>
+          <input type="text" id="cRepoInput" class="input mono" placeholder="owner/repo 或 https://github.com/owner/repo" />
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="cSubpathInput">可选子路径</label>
+            <input type="text" id="cSubpathInput" class="input mono" placeholder="skills" />
+          </div>
+          <div class="field">
+            <label for="cBranchInput">可选分支</label>
+            <input type="text" id="cBranchInput" class="input mono" placeholder="main" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="cTokenInput">私有仓库 Token（可选）</label>
+          <input type="password" id="cTokenInput" class="input mono" placeholder="ghp_xxx" autocomplete="off" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-secondary btn-sm" data-close="dlgAddCatalog">取消</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btnConfirmAddCat">添加并扫描</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- DIALOG: Install Skills Target Picker -->
+  <dialog id="dlgInstallSkill" class="modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <strong>安装技能</strong>
+        <button type="button" class="icon-btn" data-close="dlgInstallSkill">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="muted" id="installDescText"></p>
+        <label class="scope-card">
+          <input type="radio" name="instScope" value="global" checked />
+          <div>
+            <strong>👤 全局 / Antigravity</strong>
+            <div class="muted">~/.gemini/config/skills/</div>
+          </div>
+        </label>
+        <label class="scope-card">
+          <input type="radio" name="instScope" value="project" />
+          <div>
+            <strong>📁 项目 / Antigravity</strong>
+            <div class="muted">&lt;项目&gt;/.agents/skills/</div>
+          </div>
+        </label>
+        <div class="field hidden" id="instProjectSelectWrap">
+          <label for="instProjectSelect">选择项目</label>
+          <select id="instProjectSelect" class="select"></select>
+        </div>
+        <div class="field hidden" id="instProjectInputWrap">
+          <label for="instProjectInput">项目路径（留空则安装到当前项目）</label>
+          <input type="text" id="instProjectInput" class="input mono" placeholder="/path/to/your-project" />
+        </div>
+        <label class="check-row">
+          <input type="checkbox" id="instOverwrite" />
+          <span>目标已存在同名技能时覆盖</span>
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-secondary btn-sm" data-close="dlgInstallSkill">取消</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btnConfirmInstall">安装</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- DIALOG: Preview SKILL.md -->
+  <dialog id="dlgPreviewSkill" class="modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <strong id="previewTitle">SKILL.md</strong>
+        <button type="button" class="icon-btn" data-close="dlgPreviewSkill">&times;</button>
+      </div>
+      <div class="modal-body">
+        <pre id="previewContent" class="code-box"></pre>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-primary btn-sm" data-close="dlgPreviewSkill">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- DIALOG: Cache Manager -->
+  <dialog id="dlgCacheManager" class="modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <strong>清理缓存</strong>
+        <button type="button" class="icon-btn" data-close="dlgCacheManager">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="extCacheBackendWrap" class="card-stack">
+          <div class="card">
+            <div class="card-top">
+              <span class="card-title">MCP 工具缓存</span>
+              <span class="badge" id="extCacheMcpCount">0 项</span>
+            </div>
+            <div class="card-sub" id="extCacheMcpRoot">~/.gemini/antigravity-cli/mcp</div>
+            <div id="extCacheMcpList" class="card-stack"></div>
+            <div class="card-actions">
+              <button type="button" class="btn btn-primary btn-xs" id="btnExtClearMcpStale">清理失效 MCP 缓存</button>
+              <button type="button" class="btn btn-danger btn-xs" id="btnExtClearMcpAll">清空全部 MCP 缓存</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-top">
+              <span class="card-title">Skill 仓库扫描缓存</span>
+              <span class="badge" id="extCacheRepoBadge">0 个</span>
+            </div>
+            <div class="card-sub" id="extCacheRepoMeta">data/cache/repos</div>
+            <div class="card-actions">
+              <button type="button" class="btn btn-secondary btn-xs" id="btnExtClearSkillRepos">清理仓库缓存</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="extCacheBridgeWrap" class="card-stack hidden">
+          <p class="muted">零后端模式下，可一键生成清理指令填入当前 Antigravity 对话框，让 Agent 帮你清理服务器缓存：</p>
+          <button type="button" class="btn btn-primary btn-sm" id="btnBridgeClearStale">填入「仅清理失效 MCP 缓存」指令</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btnBridgeClearAll">填入「清空全部 MCP 缓存」指令</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btnBridgeClearLocalExtCache">清理插件本地 GitHub 扫描缓存</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-primary btn-sm" data-close="dlgCacheManager">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="toastArea" class="toast-area" aria-live="polite"></div>
+
+  <script src="lib.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
