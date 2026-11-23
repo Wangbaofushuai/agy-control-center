@@ -9,9 +9,11 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,18 @@ from .config_store import BUILTIN_CATALOGS, ConfigStore
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
 SAFE_FOLDER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+_REPO_LOCKS_GUARD = threading.Lock()
+_REPO_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _get_repo_lock(key: str) -> threading.Lock:
+    with _REPO_LOCKS_GUARD:
+        lock = _REPO_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _REPO_LOCKS[key] = lock
+        return lock
 
 
 def parse_skill_markdown(text: str, fallback_name: str = "") -> dict[str, Any]:
@@ -679,38 +693,49 @@ class SkillService:
         token: str,
         force_refresh: bool,
     ) -> None:
-        target_dir.parent.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ)
-        env["GIT_TERMINAL_PROMPT"] = "0"
+        lock = _get_repo_lock(str(target_dir.resolve()))
+        with lock:
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            env = dict(os.environ)
+            env["GIT_TERMINAL_PROMPT"] = "0"
 
-        auth_args: list[str] = []
-        if token and clone_url.startswith(("https://", "http://")):
-            basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
-            auth_args = ["-c", f"http.extraHeader=AUTHORIZATION: basic {basic}"]
+            auth_args: list[str] = []
+            if token and clone_url.startswith(("https://", "http://")):
+                basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+                auth_args = ["-c", f"http.extraHeader=AUTHORIZATION: basic {basic}"]
 
-        if (target_dir / ".git").exists():
-            if not force_refresh:
-                return
-            fetch_cmd = ["git", *auth_args, "-C", str(target_dir), "fetch", "--depth", "1", "origin"]
+            if (target_dir / ".git").exists():
+                if not force_refresh:
+                    return
+                fetch_cmd = ["git", *auth_args, "-C", str(target_dir), "fetch", "--depth", "1", "origin"]
+                if branch:
+                    fetch_cmd.append(branch)
+                proc = self._run_git(fetch_cmd, env=env)
+                if proc.returncode == 0:
+                    reset_proc = self._run_git(
+                        ["git", "-C", str(target_dir), "reset", "--hard", "FETCH_HEAD"], env=env
+                    )
+                    if reset_proc.returncode == 0:
+                        return
+
+            # Clone cleanly into a unique staging directory, then swap atomically
+            staging_dir = target_dir.parent / f".tmp-{target_dir.name}-{uuid.uuid4().hex[:8]}"
+            clone_cmd = ["git", *auth_args, "clone", "--depth", "1", "--single-branch"]
             if branch:
-                fetch_cmd.append(branch)
-            proc = self._run_git(fetch_cmd, env=env)
-            if proc.returncode == 0:
-                reset_ref = "FETCH_HEAD"
-                self._run_git(["git", "-C", str(target_dir), "reset", "--hard", reset_ref], env=env)
-                return
-            # Fall back to fresh clone if cached repo is broken
-            shutil.rmtree(target_dir, ignore_errors=True)
+                clone_cmd.extend(["--branch", branch])
+            clone_cmd.extend([clone_url, str(staging_dir)])
 
-        clone_cmd = ["git", *auth_args, "clone", "--depth", "1", "--single-branch"]
-        if branch:
-            clone_cmd.extend(["--branch", branch])
-        clone_cmd.extend([clone_url, str(target_dir)])
+            try:
+                proc = self._run_git(clone_cmd, env=env)
+                if proc.returncode != 0:
+                    raise RuntimeError(self._friendly_git_error(proc.stderr or proc.stdout))
 
-        proc = self._run_git(clone_cmd, env=env)
-        if proc.returncode != 0:
-            shutil.rmtree(target_dir, ignore_errors=True)
-            raise RuntimeError(self._friendly_git_error(proc.stderr or proc.stdout))
+                if target_dir.exists():
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                os.replace(staging_dir, target_dir)
+            finally:
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
 
     @staticmethod
     def _run_git(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:

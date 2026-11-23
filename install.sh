@@ -79,7 +79,7 @@ install_or_update_repo() {
     "${INSTALL_DIR}/scripts/sm.sh" \
     "${INSTALL_DIR}/plugins/agy-control-center/scripts/mcp_server.py"
   ${SUDO} mkdir -p "${INSTALL_DIR}/data"
-  if [[ -n "${SUDO}" ]]; then
+  if [[ -n "${SUDO}" || "${EUID:-$(id -u)}" -eq 0 ]]; then
     ${SUDO} chown -R "${TARGET_USER}:${TARGET_USER}" "${INSTALL_DIR}" 2>/dev/null || true
   fi
   ok "代码已就绪：${INSTALL_DIR}"
@@ -103,7 +103,7 @@ RUN_HOME=${TARGET_HOME}
 EOF
   ${SUDO} mv "${tmp_env}" "${env_file}"
   ${SUDO} chmod 600 "${env_file}"
-  if [[ -n "${SUDO}" ]]; then
+  if [[ -n "${SUDO}" || "${EUID:-$(id -u)}" -eq 0 ]]; then
     ${SUDO} chown "${TARGET_USER}:${TARGET_USER}" "${env_file}" 2>/dev/null || true
   fi
 }

@@ -113,6 +113,7 @@
     catalogs: [],
     activeCatalogId: null,
     catalogSearch: "",
+    scanningCatalogIds: new Set(),
     selectedSkillPaths: new Set(),
     installContext: null, // { catalogId, skills: [{name, relPath}] }
     transferContext: null, // installed skill item
@@ -820,7 +821,12 @@
     for (const cat of state.catalogs) {
       const card = document.createElement("div");
       card.className = `catalog-card ${state.activeCatalogId === cat.id ? "active" : ""}`;
-      const countText = cat.lastScannedAt ? `技能数: ${cat.skillCount}` : "点击扫描";
+      const isScanning = state.scanningCatalogIds.has(cat.id);
+      const countText = isScanning
+        ? "扫描中..."
+        : cat.lastScannedAt
+        ? `技能数: ${cat.skillCount}`
+        : "点击扫描";
       const metaParts = [];
       if (cat.stars !== null && cat.stars !== undefined) metaParts.push(formatStars(cat.stars));
       if (cat.updatedAt) metaParts.push(formatRelativeTime(cat.updatedAt));
@@ -1032,17 +1038,26 @@
   }
 
   async function triggerCatalogScan(catalogId, forceRefresh = true) {
+    if (state.scanningCatalogIds.has(catalogId)) return;
+    state.scanningCatalogIds.add(catalogId);
+    renderCatalogView();
     const icon = $("#btnRescanActiveCatalog svg");
     icon.classList.add("spinning");
     try {
       const res = await apiRequest("POST", "/api/catalogs/scan", { catalogId, forceRefresh });
+      state.scanningCatalogIds.delete(catalogId);
       await refreshSkills();
       if (res.error) showToast(`扫描完成但存在错误: ${res.error}`, "error");
       else showToast(`扫描完成，发现 ${res.skillCount} 个技能`, "success");
     } catch (err) {
+      state.scanningCatalogIds.delete(catalogId);
+      renderCatalogView();
       showToast(`扫描失败: ${err.message}`, "error");
     } finally {
-      icon.classList.remove("spinning");
+      state.scanningCatalogIds.delete(catalogId);
+      if (state.scanningCatalogIds.size === 0) {
+        icon.classList.remove("spinning");
+      }
     }
   }
 

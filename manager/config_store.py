@@ -228,17 +228,6 @@ class ConfigStore:
                 "exists": Path(resolved).is_dir(),
             }
 
-        # Ensure current workspace is always discoverable even if projects dir is empty
-        cur_resolved = str(self.current_workspace)
-        if cur_resolved not in projects_by_path and self.current_workspace.is_dir():
-            projects_by_path[cur_resolved] = {
-                "id": "current-workspace",
-                "name": self.current_workspace.name or "Workspace",
-                "path": cur_resolved,
-                "source": "workspace",
-                "exists": True,
-            }
-
         result: list[dict[str, Any]] = []
         for path_str, proj in sorted(
             projects_by_path.items(), key=lambda pair: (pair[1]["name"].lower(), pair[0])

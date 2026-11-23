@@ -30,6 +30,7 @@
     editingMcp: null,
     transport: "stdio",
     activeCatalogId: "builtin-anthropic",
+    scanningCatalogIds: new Set(),
     selectedSkillRelPaths: new Set(),
     installContext: null,
     lastParsedImport: null,
@@ -734,6 +735,8 @@
   }
 
   async function scanCatalogById(catalogId) {
+    if (state.scanningCatalogIds.has(catalogId)) return;
+    state.scanningCatalogIds.add(catalogId);
     const btn = $("#btnRescanCatalog");
     btn.disabled = true;
     btn.textContent = "扫描中...";
@@ -769,6 +772,7 @@
         }
       }
     } finally {
+      state.scanningCatalogIds.delete(catalogId);
       btn.disabled = false;
       btn.textContent = "刷新扫描";
     }

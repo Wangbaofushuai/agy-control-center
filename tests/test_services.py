@@ -98,12 +98,52 @@ class ControlCenterTestCase(unittest.TestCase):
         paths = [p["path"] for p in projects]
         self.assertIn(str(self.proj_a.resolve()), paths)
 
+        # Fresh install with empty projects dir must NOT inject app install dir as fake workspace
+        empty_cfg = self.root / "empty_cfg"
+        empty_cfg.mkdir()
+        empty_store = ConfigStore(
+            global_config_dir=empty_cfg,
+            data_dir=self.root / "empty_data",
+            current_workspace=self.proj_b,
+        )
+        self.assertEqual(empty_store.discover_projects(), [])
+
         added = self.store.add_custom_project(str(self.proj_b), "Beta")
         self.assertEqual(added["name"], "Beta")
         self.assertIn(str(self.proj_b.resolve()), [p["path"] for p in self.store.discover_projects()])
 
         self.assertTrue(self.store.remove_custom_project(str(self.proj_b)))
         self.assertNotIn(str(self.proj_b.resolve()), [p["path"] for p in self.store.discover_projects()])
+
+    def test_concurrent_skill_repo_scan_is_race_free(self) -> None:
+        repo_path = self._create_sample_skill_git_repo()
+        added = self.skills.add_catalog(
+            name="Concurrent Repo",
+            repo=str(repo_path),
+            subpath="skills",
+            auto_scan=False,
+        )
+        cid = added["catalog"]["id"]
+        results: list[dict] = []
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                results.append(self.skills.scan_catalog(catalog_id=cid, force_refresh=True))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 4)
+        for res in results:
+            self.assertIsNone(res["error"])
+            self.assertEqual(res["skillCount"], 2)
 
     def test_mcp_json_parse_variants(self) -> None:
         # 1. Antigravity / Claude mcpServers wrapped in markdown fence
