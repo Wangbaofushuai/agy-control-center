@@ -24,16 +24,45 @@ SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "bu
 SAFE_FOLDER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _REPO_LOCKS_GUARD = threading.Lock()
-_REPO_LOCKS: dict[str, threading.Lock] = {}
+_REPO_LOCKS: dict[str, threading.RLock] = {}
 
 
-def _get_repo_lock(key: str) -> threading.Lock:
+def _get_repo_lock(key: str) -> threading.RLock:
     with _REPO_LOCKS_GUARD:
         lock = _REPO_LOCKS.get(key)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _REPO_LOCKS[key] = lock
         return lock
+
+
+def _rmtree_force(path: Path) -> None:
+    """Remove a directory tree robustly even if Git pack files or dirs are read-only."""
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    for root, dirs, files in os.walk(path, topdown=True):
+        try:
+            os.chmod(root, 0o700)
+        except OSError:
+            pass
+        for d in dirs:
+            dp = os.path.join(root, d)
+            if not os.path.islink(dp):
+                try:
+                    os.chmod(dp, 0o700)
+                except OSError:
+                    pass
+        for f in files:
+            fp = os.path.join(root, f)
+            if not os.path.islink(fp):
+                try:
+                    os.chmod(fp, 0o600)
+                except OSError:
+                    pass
+    shutil.rmtree(path)
 
 
 def parse_skill_markdown(text: str, fallback_name: str = "") -> dict[str, Any]:
@@ -406,7 +435,8 @@ class SkillService:
     ) -> dict[str, Any]:
         norm = normalize_repo_input(repo, subpath=subpath, branch=branch)
         display_name = name.strip() or norm["githubSlug"] or Path(norm["cloneUrl"]).stem
-        cid = f"custom-{hashlib.sha1(f'{norm['cloneUrl']}|{norm['subpath']}|{norm['branch']}'.encode()).hexdigest()[:10]}"
+        raw_key = f"{norm['cloneUrl']}|{norm['subpath']}|{norm['branch']}"
+        cid = f"custom-{hashlib.sha1(raw_key.encode('utf-8')).hexdigest()[:10]}"
 
         def _save_catalog(state: dict[str, Any]) -> None:
             customs = state.setdefault("customCatalogs", [])
@@ -459,41 +489,33 @@ class SkillService:
         token: str = "",
         force_refresh: bool = True,
     ) -> dict[str, Any]:
-        source = None
-        if catalog_id:
-            source = self._find_catalog_source(catalog_id)
-            if not source:
-                raise ValueError(f"未找到技能目录: {catalog_id}")
-            norm = normalize_repo_input(
-                source.get("cloneUrl") or source["repo"],
-                subpath=source.get("subpath", ""),
-                branch=source.get("branch", ""),
-            )
-            effective_token = token.strip() or str(source.get("token") or "").strip()
-        else:
-            norm = normalize_repo_input(repo or "", subpath=subpath, branch=branch)
-            effective_token = token.strip()
-
-        repo_dir = self._cache_dir_for_repo(norm["cloneUrl"], norm["branch"])
+        norm, effective_token, repo_dir = self._resolve_repo_target(
+            catalog_id=catalog_id,
+            repo=repo,
+            subpath=subpath,
+            branch=branch,
+            token=token,
+        )
         error_msg: str | None = None
         skills: list[dict[str, Any]] = []
         gh_meta: dict[str, Any] = {}
 
         try:
-            self._sync_git_repo(
-                clone_url=norm["cloneUrl"],
-                target_dir=repo_dir,
-                branch=norm["branch"],
-                token=effective_token,
-                force_refresh=force_refresh,
-            )
-            skills = self._scan_repo_for_skills(
-                repo_dir=repo_dir,
-                subpath=norm["subpath"],
-                repo_label=norm["githubSlug"] or norm["repo"],
-                web_url=norm["webUrl"],
-                branch=self._detect_repo_branch(repo_dir) or norm["branch"] or "main",
-            )
+            with _get_repo_lock(str(repo_dir.resolve())):
+                self._sync_git_repo(
+                    clone_url=norm["cloneUrl"],
+                    target_dir=repo_dir,
+                    branch=norm["branch"],
+                    token=effective_token,
+                    force_refresh=force_refresh,
+                )
+                skills = self._scan_repo_for_skills(
+                    repo_dir=repo_dir,
+                    subpath=norm["subpath"],
+                    repo_label=norm["githubSlug"] or norm["repo"],
+                    web_url=norm["webUrl"],
+                    branch=self._detect_repo_branch(repo_dir) or norm["branch"] or "main",
+                )
             if norm["githubSlug"]:
                 gh_meta = self._fetch_github_meta(norm["githubSlug"], effective_token)
         except Exception as exc:
@@ -542,31 +564,39 @@ class SkillService:
         token: str = "",
         rel_path: str,
     ) -> dict[str, Any]:
-        repo_dir = self._ensure_repo_for_operation(
+        _, _, resolved_repo_dir = self._resolve_repo_target(
             catalog_id=catalog_id,
             repo=repo,
             subpath=subpath,
             branch=branch,
             token=token,
         )
-        skill_dir = self._safe_subpath(repo_dir, rel_path)
-        skill_md = skill_dir / "SKILL.md"
-        if not skill_md.is_file():
-            raise ValueError("未找到 SKILL.md")
-        raw = skill_md.read_text(encoding="utf-8", errors="replace")
-        parsed = parse_skill_markdown(raw, fallback_name=skill_dir.name)
-        files = sorted(
-            str(p.relative_to(skill_dir))
-            for p in skill_dir.rglob("*")
-            if p.is_file() and ".git" not in p.parts
-        )
-        return {
-            "name": parsed["name"],
-            "description": parsed["description"],
-            "markdown": raw,
-            "relPath": rel_path,
-            "files": files,
-        }
+        with _get_repo_lock(str(resolved_repo_dir.resolve())):
+            repo_dir = self._ensure_repo_for_operation(
+                catalog_id=catalog_id,
+                repo=repo,
+                subpath=subpath,
+                branch=branch,
+                token=token,
+            )
+            skill_dir = self._safe_subpath(repo_dir, rel_path)
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.is_file():
+                raise ValueError("未找到 SKILL.md")
+            raw = skill_md.read_text(encoding="utf-8", errors="replace")
+            parsed = parse_skill_markdown(raw, fallback_name=skill_dir.name)
+            files = sorted(
+                str(p.relative_to(skill_dir))
+                for p in skill_dir.rglob("*")
+                if p.is_file() and ".git" not in p.parts
+            )
+            return {
+                "name": parsed["name"],
+                "description": parsed["description"],
+                "markdown": raw,
+                "relPath": rel_path,
+                "files": files,
+            }
 
     def install_skills(
         self,
@@ -592,60 +622,68 @@ class SkillService:
         )
         target_root.mkdir(parents=True, exist_ok=True)
 
-        repo_dir = self._ensure_repo_for_operation(
+        installed: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+
+        _, _, resolved_repo_dir = self._resolve_repo_target(
             catalog_id=catalog_id,
             repo=repo,
             subpath=subpath,
             branch=branch,
             token=token,
         )
+        with _get_repo_lock(str(resolved_repo_dir.resolve())):
+            repo_dir = self._ensure_repo_for_operation(
+                catalog_id=catalog_id,
+                repo=repo,
+                subpath=subpath,
+                branch=branch,
+                token=token,
+            )
 
-        installed: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
-        errors: list[dict[str, Any]] = []
+            for rel in skill_rel_paths:
+                try:
+                    src_dir = self._safe_subpath(repo_dir, rel)
+                    skill_md = src_dir / "SKILL.md"
+                    if not skill_md.is_file():
+                        raise ValueError(f"目录 {rel} 缺少 SKILL.md")
+                    parsed = parse_skill_markdown(
+                        skill_md.read_text(encoding="utf-8", errors="replace"),
+                        fallback_name=src_dir.name,
+                    )
+                    folder_name = self._sanitize_folder_name(parsed["name"] or src_dir.name)
+                    dst_dir = (target_root / folder_name).resolve()
+                    if dst_dir.parent != target_root.resolve():
+                        raise ValueError(f"非法安装目录名: {folder_name}")
 
-        for rel in skill_rel_paths:
-            try:
-                src_dir = self._safe_subpath(repo_dir, rel)
-                skill_md = src_dir / "SKILL.md"
-                if not skill_md.is_file():
-                    raise ValueError(f"目录 {rel} 缺少 SKILL.md")
-                parsed = parse_skill_markdown(
-                    skill_md.read_text(encoding="utf-8", errors="replace"),
-                    fallback_name=src_dir.name,
-                )
-                folder_name = self._sanitize_folder_name(parsed["name"] or src_dir.name)
-                dst_dir = (target_root / folder_name).resolve()
-                if dst_dir.parent != target_root.resolve():
-                    raise ValueError(f"非法安装目录名: {folder_name}")
+                    if dst_dir.exists():
+                        if not overwrite:
+                            skipped.append(
+                                {
+                                    "name": folder_name,
+                                    "relPath": rel,
+                                    "reason": "目标位置已存在同名技能",
+                                }
+                            )
+                            continue
+                        shutil.rmtree(dst_dir)
 
-                if dst_dir.exists():
-                    if not overwrite:
-                        skipped.append(
-                            {
-                                "name": folder_name,
-                                "relPath": rel,
-                                "reason": "目标位置已存在同名技能",
-                            }
-                        )
-                        continue
-                    shutil.rmtree(dst_dir)
-
-                shutil.copytree(
-                    src_dir,
-                    dst_dir,
-                    ignore=shutil.ignore_patterns(".git"),
-                    ignore_dangling_symlinks=True,
-                )
-                installed.append(
-                    {
-                        "name": folder_name,
-                        "relPath": rel,
-                        "destination": str(dst_dir),
-                    }
-                )
-            except Exception as exc:
-                errors.append({"relPath": rel, "error": str(exc)})
+                    shutil.copytree(
+                        src_dir,
+                        dst_dir,
+                        ignore=shutil.ignore_patterns(".git"),
+                        ignore_dangling_symlinks=True,
+                    )
+                    installed.append(
+                        {
+                            "name": folder_name,
+                            "relPath": rel,
+                            "destination": str(dst_dir),
+                        }
+                    )
+                except Exception as exc:
+                    errors.append({"relPath": rel, "error": str(exc)})
 
         return {
             "scope": norm_scope,
@@ -676,7 +714,7 @@ class SkillService:
                 return item
         return None
 
-    def _ensure_repo_for_operation(
+    def _resolve_repo_target(
         self,
         *,
         catalog_id: str | None,
@@ -684,7 +722,7 @@ class SkillService:
         subpath: str,
         branch: str,
         token: str,
-    ) -> Path:
+    ) -> tuple[dict[str, str], str, Path]:
         if catalog_id:
             source = self._find_catalog_source(catalog_id)
             if not source:
@@ -700,14 +738,33 @@ class SkillService:
             effective_token = token.strip()
 
         repo_dir = self._cache_dir_for_repo(norm["cloneUrl"], norm["branch"])
-        if not (repo_dir / ".git").exists():
-            self._sync_git_repo(
-                clone_url=norm["cloneUrl"],
-                target_dir=repo_dir,
-                branch=norm["branch"],
-                token=effective_token,
-                force_refresh=True,
-            )
+        return norm, effective_token, repo_dir
+
+    def _ensure_repo_for_operation(
+        self,
+        *,
+        catalog_id: str | None,
+        repo: str | None,
+        subpath: str,
+        branch: str,
+        token: str,
+    ) -> Path:
+        norm, effective_token, repo_dir = self._resolve_repo_target(
+            catalog_id=catalog_id,
+            repo=repo,
+            subpath=subpath,
+            branch=branch,
+            token=token,
+        )
+        with _get_repo_lock(str(repo_dir.resolve())):
+            if not (repo_dir / ".git").exists():
+                self._sync_git_repo(
+                    clone_url=norm["cloneUrl"],
+                    target_dir=repo_dir,
+                    branch=norm["branch"],
+                    token=effective_token,
+                    force_refresh=True,
+                )
         return repo_dir
 
     def _cache_dir_for_repo(self, clone_url: str, branch: str) -> Path:
@@ -760,12 +817,15 @@ class SkillService:
                 if proc.returncode != 0:
                     raise RuntimeError(self._friendly_git_error(proc.stderr or proc.stdout))
 
-                if target_dir.exists():
-                    shutil.rmtree(target_dir, ignore_errors=True)
+                if target_dir.exists() or target_dir.is_symlink():
+                    _rmtree_force(target_dir)
                 os.replace(staging_dir, target_dir)
             finally:
-                if staging_dir.exists():
-                    shutil.rmtree(staging_dir, ignore_errors=True)
+                if staging_dir.exists() or staging_dir.is_symlink():
+                    try:
+                        _rmtree_force(staging_dir)
+                    except OSError:
+                        shutil.rmtree(staging_dir, ignore_errors=True)
 
     @staticmethod
     def _run_git(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:

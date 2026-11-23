@@ -293,10 +293,12 @@
 
       updateSidebarMeta();
       renderCurrentView();
+      return true;
     } catch (err) {
       if (err?.status !== 401) {
         showToast(`加载数据失败: ${err.message}`, "error");
       }
+      return false;
     }
   }
 
@@ -1756,7 +1758,10 @@
     const submitApiToken = async () => {
       setStoredApiToken($("#webApiTokenInput").value);
       closeModal("modalApiToken");
-      await loadAllData();
+      const ok = await loadAllData();
+      if (!ok) {
+        showToast("API Token 校验失败或连接异常，请核对后重试", "error");
+      }
     };
     $("#btnOpenApiToken")?.addEventListener("click", () => openApiTokenModal(false));
     $("#btnSaveWebApiToken")?.addEventListener("click", submitApiToken);

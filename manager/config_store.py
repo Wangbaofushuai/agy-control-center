@@ -266,12 +266,13 @@ class ConfigStore:
                         pass
             mcp_count = len(mcp_names)
             skill_count = 0
-            if skills_dir.is_dir():
-                skill_count = sum(
-                    1
-                    for child in skills_dir.iterdir()
-                    if child.is_dir() and (child / "SKILL.md").is_file()
-                )
+            for candidate_skills_dir in (skills_dir, p / ".agent" / "skills"):
+                if candidate_skills_dir.is_dir():
+                    skill_count += sum(
+                        1
+                        for child in candidate_skills_dir.iterdir()
+                        if child.is_dir() and (child / "SKILL.md").is_file()
+                    )
             proj["mcpConfigPath"] = str(mcp_file)
             proj["skillsDir"] = str(skills_dir)
             proj["mcpCount"] = mcp_count

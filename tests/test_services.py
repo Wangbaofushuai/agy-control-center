@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import json
+import os
 import re
 import struct
 import subprocess
@@ -583,7 +585,7 @@ class ControlCenterTestCase(unittest.TestCase):
             encoding="utf-8",
         )
         env = {
-            **dict(subprocess.os.environ),
+            **os.environ,
             "AGY_SM_INSTALL_DIR": str(sandbox_dir),
             "SM_NO_SYSTEMD": "1",
         }
@@ -641,6 +643,9 @@ class ControlCenterTestCase(unittest.TestCase):
             "---\nname: legacy-helper\ndescription: Legacy skill.\n---\n# Legacy\n",
             encoding="utf-8",
         )
+
+        projects = {p["path"]: p for p in self.store.discover_projects()}
+        self.assertGreaterEqual(projects[str(self.proj_a.resolve())]["skillCount"], 1)
 
         installed = self.skills.list_installed_skills()["skills"]
         self.assertIn("legacy-helper", [s["folderName"] for s in installed])
@@ -700,7 +705,7 @@ class ControlCenterTestCase(unittest.TestCase):
     def test_mcp_stdio_supports_jsonl_and_content_length_framing(self) -> None:
         script = REPO_ROOT / "plugins" / "agy-control-center" / "scripts" / "mcp_server.py"
         env = {
-            **dict(subprocess.os.environ),
+            **os.environ,
             "AGY_CONFIG_DIR": str(self.global_cfg),
             "AGY_DATA_DIR": str(self.data_dir),
         }
@@ -731,6 +736,30 @@ class ControlCenterTestCase(unittest.TestCase):
         resp2 = json.loads(body.decode("utf-8"))
         self.assertEqual(resp2["id"], 2)
         self.assertEqual(resp2["result"], {})
+
+    def test_python310_syntax_compatibility(self) -> None:
+        for py_file in sorted(REPO_ROOT.rglob("*.py")):
+            if any(part in {".git", ".agents", "data", "__pycache__"} for part in py_file.parts):
+                continue
+            src = py_file.read_text(encoding="utf-8")
+            tree = ast.parse(src, filename=str(py_file), feature_version=(3, 10))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.JoinedStr):
+                    seg = ast.get_source_segment(src, node) or ""
+                    for child in ast.walk(node):
+                        if child is not node and isinstance(child, ast.JoinedStr):
+                            self.fail(f"Nested f-string not Python 3.10 compatible in {py_file}:{node.lineno}: {seg}")
+                    outer_q = seg[1] if len(seg) > 1 and seg[1] in ("'", '"') else ""
+                    for val in node.values:
+                        if isinstance(val, ast.FormattedValue):
+                            vseg = ast.get_source_segment(src, val) or ""
+                            self.assertNotIn("\\", vseg, f"Backslash in f-string expr in {py_file}:{node.lineno}")
+                            if outer_q and not seg.startswith(('f"""', "f'''")):
+                                self.assertNotIn(
+                                    outer_q,
+                                    vseg,
+                                    f"Matching quote in f-string expr in {py_file}:{node.lineno}: {seg}",
+                                )
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ save_env() {
   tmp_env="$(mktemp)"
   cat > "${tmp_env}" <<EOF
 INSTALL_DIR=${INSTALL_DIR}
+BIN_LINK=${BIN_LINK:-/usr/local/bin/sm}
 REPO_URL=${REPO_URL:-https://github.com/Wangbaofushuai/agy-control-center.git}
 BRANCH=${BRANCH:-main}
 HOST=${HOST:-0.0.0.0}
@@ -238,7 +239,7 @@ cmd_update() {
   before="$(git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
   printf "${CYAN}正在从 Git 仓库同步最新版本 (%s)...${NC}\n" "${BRANCH}"
   run_install_cmd git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" fetch origin "${BRANCH}" --depth 1
-  run_install_cmd git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" reset --hard "origin/${BRANCH}"
+  run_install_cmd git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" reset --hard FETCH_HEAD
   run_install_cmd chmod +x \
     "${INSTALL_DIR}/start.sh" \
     "${INSTALL_DIR}/install.sh" \

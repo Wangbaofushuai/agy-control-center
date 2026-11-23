@@ -62,8 +62,8 @@ install_or_update_repo() {
   if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "检测到已有安装目录 ${INSTALL_DIR}，正在同步最新代码..."
     ${SUDO} git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" fetch origin "${BRANCH}" --depth 1
-    ${SUDO} git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" checkout "${BRANCH}" 2>/dev/null || true
-    ${SUDO} git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" reset --hard "origin/${BRANCH}"
+    ${SUDO} git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" checkout -B "${BRANCH}" FETCH_HEAD
+    ${SUDO} git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" reset --hard FETCH_HEAD
   else
     info "正在拉取代码到 ${INSTALL_DIR}..."
     ${SUDO} mkdir -p "$(dirname "${INSTALL_DIR}")"
@@ -92,6 +92,7 @@ write_env_file() {
   tmp_env="$(mktemp)"
   cat > "${tmp_env}" <<EOF
 INSTALL_DIR=${INSTALL_DIR}
+BIN_LINK=${BIN_LINK}
 REPO_URL=${REPO_URL}
 BRANCH=${BRANCH}
 HOST=${HOST}
