@@ -368,7 +368,8 @@
               );
               if (fileRes.ok) rawMd = fileRes.text || "";
             } else {
-              const rawUrl = `https://raw.githubusercontent.com/${norm.githubSlug}/${encodeURIComponent(targetBranch)}/${mdPath.split("/").map(encodeURIComponent).join("/")}`;
+              const encodedBranch = targetBranch.split("/").map(encodeURIComponent).join("/");
+              const rawUrl = `https://raw.githubusercontent.com/${norm.githubSlug}/${encodedBranch}/${mdPath.split("/").map(encodeURIComponent).join("/")}`;
               const rawRes = await proxyFetch(rawUrl);
               if (rawRes.ok) rawMd = rawRes.text || "";
             }

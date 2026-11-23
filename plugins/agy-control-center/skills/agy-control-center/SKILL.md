@@ -18,7 +18,7 @@ Use this skill when the user wants to manage MCP servers or Agent Skills across 
 
 2. **MCP Management via MCP Tools**:
    - `list_mcp_servers`: Inspect all global and project MCP servers.
-   - `import_mcp_json`: Parse Antigravity / Claude / Cursor / OpenCode MCP JSON snippets and write to `~/.gemini/config/mcp_config.json` (`scope="global"`) or `<project>/.agents/mcp_config.json` (`scope="project"`).
+   - `import_mcp_json`: Parse Antigravity / Claude / Cursor / OpenCode MCP JSON snippets and write to `~/.gemini/config/mcp_config.json` (`scope="global"`) or `<project>/.agents/plugins/project-mcp/mcp_config.json` (`scope="project"`).
 
 3. **Skill Catalog Scanning & Installation**:
    - `list_installed_skills`: Inspect installed global and project skills.

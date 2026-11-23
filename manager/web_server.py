@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import io
 import json
 import mimetypes
 import os
 import shutil
+import signal
 import sys
+import threading
 import zipfile
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -19,7 +22,14 @@ from urllib.parse import parse_qs, urlparse
 
 from .config_store import REPO_ROOT, ConfigStore
 from .mcp_service import McpService
-from .skill_service import SkillService
+from .skill_service import SkillService, _get_repo_lock
+
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    """HTTP server that releases ports immediately and never hangs on keep-alive sockets."""
+
+    allow_reuse_address = True
+    daemon_threads = True
 
 WEB_DIR = REPO_ROOT / "web"
 PLUGIN_DIR = REPO_ROOT / "plugins" / "agy-control-center"
@@ -171,8 +181,17 @@ class ControlCenterApp:
                 )
 
         repo_cache_dir = self.store.repo_cache_dir
-        repo_dirs = [p for p in repo_cache_dir.iterdir() if p.is_dir()] if repo_cache_dir.is_dir() else []
-        repo_files, repo_bytes = self._dir_stats(repo_cache_dir)
+        repo_dirs = (
+            [p for p in repo_cache_dir.iterdir() if p.is_dir() and not p.name.startswith(".tmp-")]
+            if repo_cache_dir.is_dir()
+            else []
+        )
+        repo_files = 0
+        repo_bytes = 0
+        for rd in repo_dirs:
+            f_cnt, b_cnt = self._dir_stats(rd)
+            repo_files += f_cnt
+            repo_bytes += b_cnt
 
         return {
             "mcpCacheDirs": [str(p) for p in mcp_dirs],
@@ -212,16 +231,22 @@ class ControlCenterApp:
             repo_root = self.store.repo_cache_dir.resolve()
             if repo_root.is_dir():
                 for child in sorted(repo_root.iterdir(), key=lambda p: p.name):
+                    if child.name.startswith(".tmp-"):
+                        continue
                     child_res = child.resolve()
                     if child_res.parent != repo_root:
                         continue
-                    _, sz = self._dir_stats(child_res)
-                    freed_bytes += sz
-                    if child_res.is_dir():
-                        shutil.rmtree(child_res)
-                    else:
-                        child_res.unlink(missing_ok=True)
-                    removed_names.append(child.name)
+                    lock = _get_repo_lock(str(child_res))
+                    with lock:
+                        if not child_res.exists():
+                            continue
+                        _, sz = self._dir_stats(child_res)
+                        freed_bytes += sz
+                        if child_res.is_dir():
+                            shutil.rmtree(child_res)
+                        else:
+                            child_res.unlink(missing_ok=True)
+                        removed_names.append(child.name)
 
         return {
             "target": norm_target,
@@ -255,7 +280,7 @@ def make_handler(app: ControlCenterApp, api_token: str = "") -> type[BaseHTTPReq
             hdr_token = self.headers.get("X-API-Token", "").strip()
             auth_hdr = self.headers.get("Authorization", "").strip()
             bearer = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
-            if hdr_token == api_token or bearer == api_token:
+            if hmac.compare_digest(hdr_token, api_token) or hmac.compare_digest(bearer, api_token):
                 return True
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "API Token 校验失败"})
             return False
@@ -294,10 +319,17 @@ def make_handler(app: ControlCenterApp, api_token: str = "") -> type[BaseHTTPReq
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
                 return
             mime, _ = mimetypes.guess_type(str(path))
+            mime = mime or "application/octet-stream"
+            is_text = mime.startswith("text/") or mime in (
+                "application/javascript",
+                "application/json",
+                "image/svg+xml",
+            )
+            content_type = f"{mime}; charset=utf-8" if is_text else mime
             data = path.read_bytes()
             self.send_response(HTTPStatus.OK)
             self._send_cors_headers()
-            self.send_header("Content-Type", f"{mime or 'application/octet-stream'}; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
@@ -307,6 +339,8 @@ def make_handler(app: ControlCenterApp, api_token: str = "") -> type[BaseHTTPReq
             length = int(self.headers.get("Content-Length", "0") or "0")
             if length <= 0:
                 return {}
+            if length > 10 * 1024 * 1024:
+                raise ValueError("请求体过大（上限 10MB）")
             raw = self.rfile.read(length).decode("utf-8")
             if not raw.strip():
                 return {}
@@ -556,7 +590,7 @@ def create_server(
     effective_token = (
         api_token if api_token is not None else os.environ.get("AGY_API_TOKEN", "")
     ).strip()
-    return ThreadingHTTPServer((host, port), make_handler(app, api_token=effective_token))
+    return ReusableThreadingHTTPServer((host, port), make_handler(app, api_token=effective_token))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -575,6 +609,12 @@ def main(argv: list[str] | None = None) -> int:
         data_dir=args.data_dir,
         api_token=args.token,
     )
+
+    def _handle_sigterm(_signum: int, _frame: Any) -> None:
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     print(f"Antigravity Control Center running at http://{args.host}:{args.port}")
     print(f"Global config dir: {ConfigStore(args.config_dir, args.data_dir).global_config_dir}")
     try:

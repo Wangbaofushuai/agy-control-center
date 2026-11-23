@@ -61,9 +61,9 @@ PY
 install_or_update_repo() {
   if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "检测到已有安装目录 ${INSTALL_DIR}，正在同步最新代码..."
-    ${SUDO} git -C "${INSTALL_DIR}" fetch origin "${BRANCH}" --depth 1
-    ${SUDO} git -C "${INSTALL_DIR}" checkout "${BRANCH}" 2>/dev/null || true
-    ${SUDO} git -C "${INSTALL_DIR}" reset --hard "origin/${BRANCH}"
+    ${SUDO} git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" fetch origin "${BRANCH}" --depth 1
+    ${SUDO} git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" checkout "${BRANCH}" 2>/dev/null || true
+    ${SUDO} git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" reset --hard "origin/${BRANCH}"
   else
     info "正在拉取代码到 ${INSTALL_DIR}..."
     ${SUDO} mkdir -p "$(dirname "${INSTALL_DIR}")"
@@ -160,7 +160,28 @@ EOF
   ok "systemd 服务已启用并后台运行"
 }
 
+check_port_conflict() {
+  # Stop our own existing service first if upgrading in place
+  if has_systemd && [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+    ${SUDO} systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+  elif [[ -x "${INSTALL_DIR}/scripts/sm.sh" ]]; then
+    ${SUDO} env AGY_SM_INSTALL_DIR="${INSTALL_DIR}" "${INSTALL_DIR}/scripts/sm.sh" stop >/dev/null 2>&1 || true
+  fi
+
+  if python3 - "${PORT}" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.settimeout(0.5)
+    raise SystemExit(0 if s.connect_ex(("127.0.0.1", port)) == 0 else 1)
+PY
+  then
+    fail "端口 ${PORT} 已被其他进程占用！请先停止占用该端口的程序（如之前手动启动的 start.sh），或改用其他端口安装：curl -fsSL ... | PORT=8788 bash"
+  fi
+}
+
 start_service() {
+  check_port_conflict
   if has_systemd && [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SUDO}" ]]; then
     setup_systemd_service
   else
@@ -173,13 +194,19 @@ wait_for_health() {
   info "等待服务启动健康检查 (http://127.0.0.1:${PORT}/api/health)..."
   local i
   for i in $(seq 1 20); do
+    if has_systemd && [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+      if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
+        sleep 0.3
+        continue
+      fi
+    fi
     if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${PORT}/api/health', timeout=1)" >/dev/null 2>&1; then
       ok "服务健康检查通过！"
       return 0
     fi
     sleep 0.3
   done
-  warn "服务仍在初始化中，请执行 'sm status' 或 'sm logs' 查看详情。"
+  warn "服务未能通过健康检查，请执行 'sm status' 或 'sm logs' 查看详情。"
 }
 
 print_summary() {

@@ -219,12 +219,14 @@
       state.backendMcpServers = mcpData.servers || [];
       state.backendInstalledSkills = skillsData.skills || [];
       state.backendCatalogs = catData.catalogs || [];
-      if (!state.activeCatalogId && state.backendCatalogs.length) {
-        state.activeCatalogId = state.backendCatalogs[0].id;
+      if (!state.activeCatalogId || !state.backendCatalogs.some((c) => c.id === state.activeCatalogId)) {
+        state.activeCatalogId = state.backendCatalogs[0]?.id || null;
       }
       renderAll();
+      return true;
     } catch (err) {
       toast(`连接后端失败: ${err.message}`, "err");
+      return false;
     }
   }
 
@@ -278,6 +280,9 @@
       for (const p of state.backendProjects) scopes.push({ key: `project:${p.path}`, label: p.name });
     } else {
       scopes.push({ key: "project", label: "项目" });
+    }
+    if (!scopes.some((s) => s.key === state.mcpScopeFilter)) {
+      state.mcpScopeFilter = "all";
     }
     for (const s of scopes) {
       const chip = document.createElement("button");
@@ -508,6 +513,10 @@
     try {
       const form = readMcpEditorForm();
       if (state.mode === "backend") {
+        if (form.scope === "project" && !form.projectPath) {
+          toast("直连后端模式下，项目级 MCP 请填写或选择有效的项目绝对路径", "err");
+          return;
+        }
         const saveRes = await backendApi("POST", "/api/mcp/save", {
           scope: form.scope,
           projectPath: form.projectPath,
@@ -583,13 +592,19 @@
     for (const cat of catalogs) {
       const card = document.createElement("div");
       card.className = `cat-card ${cat.id === state.activeCatalogId ? "active" : ""}`;
+      const isScanning = state.scanningCatalogIds.has(cat.id);
+      const statusText = isScanning
+        ? "扫描中..."
+        : cat.lastScannedAt
+        ? `技能: ${cat.skillCount}`
+        : "点击扫描";
       card.innerHTML = `
         <div class="card-top">
           <span class="cat-name">${esc(cat.name)}</span>
           ${cat.builtin ? "" : '<button type="button" class="icon-btn" data-rm="1" title="删除">&times;</button>'}
         </div>
         <div class="cat-repo" title="${esc(cat.repo)}">${esc(cat.repo)}</div>
-        <div class="cat-meta">${cat.lastScannedAt ? `技能: ${cat.skillCount}` : "点击扫描"} ${fmtStars(cat.stars)}</div>
+        <div class="cat-meta">${esc(statusText)} ${fmtStars(cat.stars)}</div>
       `;
 
       card.addEventListener("click", async (e) => {
@@ -606,16 +621,20 @@
       if (rmBtn) {
         rmBtn.addEventListener("click", async (e) => {
           e.stopPropagation();
-          if (state.mode === "backend") {
-            await backendApi("DELETE", "/api/catalogs", null, { id: cat.id });
-            await refreshBackendAll();
-          } else {
-            state.localCustomCatalogs = state.localCustomCatalogs.filter((c) => c.id !== cat.id);
-            delete state.localCatalogCache[cat.id];
-            await savePersisted();
-            renderCatalogTab();
+          try {
+            if (state.mode === "backend") {
+              await backendApi("DELETE", "/api/catalogs", null, { id: cat.id });
+              await refreshBackendAll();
+            } else {
+              state.localCustomCatalogs = state.localCustomCatalogs.filter((c) => c.id !== cat.id);
+              delete state.localCatalogCache[cat.id];
+              await savePersisted();
+              renderCatalogTab();
+            }
+            toast("已移除仓库来源", "ok");
+          } catch (err) {
+            toast(err.message, "err");
           }
-          toast("已移除仓库来源", "ok");
         });
       }
 
@@ -737,12 +756,14 @@
   async function scanCatalogById(catalogId) {
     if (state.scanningCatalogIds.has(catalogId)) return;
     state.scanningCatalogIds.add(catalogId);
+    renderCatalogTab();
     const btn = $("#btnRescanCatalog");
     btn.disabled = true;
     btn.textContent = "扫描中...";
     try {
       if (state.mode === "backend") {
         const res = await backendApi("POST", "/api/catalogs/scan", { catalogId, forceRefresh: true });
+        state.scanningCatalogIds.delete(catalogId);
         await refreshBackendAll();
         if (res.error) toast(`扫描出错: ${res.error}`, "err");
         else toast(`扫描完成，发现 ${res.skillCount} 个技能`, "ok");
@@ -758,6 +779,7 @@
           });
           state.localCatalogCache[catalogId] = res;
           await savePersisted();
+          state.scanningCatalogIds.delete(catalogId);
           renderCatalogTab();
           toast(`扫描完成，发现 ${res.skillCount} 个技能`, "ok");
         } catch (err) {
@@ -767,14 +789,22 @@
             error: err.message,
           };
           await savePersisted();
+          state.scanningCatalogIds.delete(catalogId);
           renderCatalogTab();
           toast(err.message, "err");
         }
       }
+    } catch (err) {
+      state.scanningCatalogIds.delete(catalogId);
+      renderCatalogTab();
+      toast(`扫描失败: ${err.message}`, "err");
     } finally {
       state.scanningCatalogIds.delete(catalogId);
-      btn.disabled = false;
-      btn.textContent = "刷新扫描";
+      if (state.scanningCatalogIds.size === 0) {
+        btn.disabled = false;
+        btn.textContent = "刷新扫描";
+      }
+      renderCatalogTab();
     }
   }
 
@@ -829,6 +859,9 @@
       { key: "global", label: "全局" },
       ...state.backendProjects.map((p) => ({ key: `project:${p.path}`, label: p.name })),
     ];
+    if (!scopes.some((s) => s.key === state.installedScopeFilter)) {
+      state.installedScopeFilter = "all";
+    }
     for (const s of scopes) {
       const chip = document.createElement("button");
       chip.type = "button";
@@ -988,6 +1021,8 @@
       if (!parsed || !parsed.servers.length) return;
       const first = parsed.servers[0];
       openMcpEditor({ name: first.name, scope: "global", enabled: first.enabled, config: first.config });
+      state.editingMcp = null;
+      $("#mcpEditorTitle").textContent = "新建 MCP 服务器";
       closeDlg("dlgImportJson");
       toast(`已将 ${first.name} 填充到表单`, "ok");
     });
@@ -1005,6 +1040,10 @@
           : null;
 
       if (state.mode === "backend") {
+        if (scope === "project" && !projectPath) {
+          toast("直连后端模式下，项目级导入请先选择具体项目或在「连接」页配置默认项目路径", "err");
+          return;
+        }
         try {
           const res = await backendApi("POST", "/api/mcp/import", {
             scope,
@@ -1020,17 +1059,17 @@
         }
       } else {
         const serversMap = {};
-        for (const s of parsed.servers) {
+        parsed.servers.forEach((s, idx) => {
           serversMap[s.name] = s.config;
           state.localMcpDrafts.unshift({
-            id: `draft-${Date.now()}-${s.name}`,
+            id: `draft-${Date.now()}-${idx}-${s.name}`,
             name: s.name,
             scope,
             projectPath,
             enabled: s.enabled,
             config: s.config,
           });
-        }
+        });
         await savePersisted();
         closeDlg("dlgImportJson");
         renderMcpTab();
@@ -1131,6 +1170,10 @@
           : null;
 
       if (state.mode === "backend") {
+        if (scope === "project" && !projectPath) {
+          toast("直连后端模式下，请填写或选择有效的项目绝对路径", "err");
+          return;
+        }
         const btn = $("#btnConfirmInstall");
         btn.disabled = true;
         btn.textContent = "安装中...";
@@ -1203,12 +1246,22 @@
     });
 
     $("#btnSaveBackend").addEventListener("click", async () => {
-      state.backendUrl = cleanBaseUrl($("#sBackendUrl").value);
+      const url = cleanBaseUrl($("#sBackendUrl").value);
+      if (!url) {
+        toast("请先填写后端服务器地址", "err");
+        return;
+      }
+      state.backendUrl = url;
       state.backendToken = $("#sBackendToken").value.trim();
+      state.mode = "backend";
+      $$(".mode-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === "backend"));
       await savePersisted();
-      await setMode("backend");
-      switchTab("mcp");
-      toast("已切换到直连后端模式", "ok");
+      updateConnectionSubtitle();
+      const ok = await refreshBackendAll();
+      if (ok) {
+        switchTab("mcp");
+        toast("已切换到直连后端模式", "ok");
+      }
     });
 
     $("#btnSaveLocalPrefs").addEventListener("click", async () => {

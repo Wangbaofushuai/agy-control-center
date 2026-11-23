@@ -206,7 +206,9 @@ class SkillService:
     def get_installed_skill_detail(
         self, scope: str, project_path: str | None, folder_name: str
     ) -> dict[str, Any]:
-        skill_dir = self._resolve_installed_skill_dir(scope, project_path, folder_name)
+        skill_dir = self._resolve_installed_skill_dir(
+            scope, project_path, folder_name, allow_legacy_read=True
+        )
         skill_md = skill_dir / "SKILL.md"
         if not skill_md.is_file():
             raise ValueError(f"未找到技能: {folder_name}")
@@ -230,7 +232,9 @@ class SkillService:
     def delete_installed_skill(
         self, scope: str, project_path: str | None, folder_name: str
     ) -> bool:
-        skill_dir = self._resolve_installed_skill_dir(scope, project_path, folder_name)
+        skill_dir = self._resolve_installed_skill_dir(
+            scope, project_path, folder_name, allow_legacy_read=True
+        )
         if not skill_dir.is_dir():
             return False
         shutil.rmtree(skill_dir)
@@ -247,7 +251,9 @@ class SkillService:
         move: bool = False,
         overwrite: bool = False,
     ) -> dict[str, Any]:
-        src_dir = self._resolve_installed_skill_dir(src_scope, src_project_path, folder_name)
+        src_dir = self._resolve_installed_skill_dir(
+            src_scope, src_project_path, folder_name, allow_legacy_read=True
+        )
         if not src_dir.is_dir():
             raise ValueError(f"源技能不存在: {folder_name}")
 
@@ -260,7 +266,12 @@ class SkillService:
             shutil.rmtree(dst_dir)
 
         dst_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src_dir, dst_dir, ignore=shutil.ignore_patterns(".git"))
+        shutil.copytree(
+            src_dir,
+            dst_dir,
+            ignore=shutil.ignore_patterns(".git"),
+            ignore_dangling_symlinks=True,
+        )
         if move:
             shutil.rmtree(src_dir)
         return {
@@ -270,7 +281,12 @@ class SkillService:
         }
 
     def _resolve_installed_skill_dir(
-        self, scope: str, project_path: str | None, folder_name: str
+        self,
+        scope: str,
+        project_path: str | None,
+        folder_name: str,
+        *,
+        allow_legacy_read: bool = False,
     ) -> Path:
         clean = folder_name.strip()
         if not clean or "/" in clean or "\\" in clean or clean in (".", ".."):
@@ -284,6 +300,11 @@ class SkillService:
         target = (base / clean).resolve()
         if target.parent != base.resolve():
             raise ValueError("非法技能路径")
+        if allow_legacy_read and not target.is_dir() and norm_scope == "project" and norm_proj is not None:
+            legacy_base = (norm_proj / ".agent" / "skills").resolve()
+            legacy_target = (legacy_base / clean).resolve()
+            if legacy_target.parent == legacy_base and legacy_target.is_dir():
+                return legacy_target
         return target
 
     def _scan_installed_dir(
@@ -387,22 +408,24 @@ class SkillService:
         display_name = name.strip() or norm["githubSlug"] or Path(norm["cloneUrl"]).stem
         cid = f"custom-{hashlib.sha1(f'{norm['cloneUrl']}|{norm['subpath']}|{norm['branch']}'.encode()).hexdigest()[:10]}"
 
-        state = self.store.load_state()
-        customs = state.setdefault("customCatalogs", [])
-        customs = [c for c in customs if c.get("id") != cid]
-        entry = {
-            "id": cid,
-            "name": display_name,
-            "repo": norm["githubSlug"] or norm["repo"],
-            "cloneUrl": norm["cloneUrl"],
-            "subpath": norm["subpath"],
-            "branch": norm["branch"],
-            "token": token.strip(),
-            "builtin": False,
-        }
-        customs.append(entry)
-        state["customCatalogs"] = customs
-        self.store.save_state(state)
+        def _save_catalog(state: dict[str, Any]) -> None:
+            customs = state.setdefault("customCatalogs", [])
+            customs = [c for c in customs if c.get("id") != cid]
+            customs.append(
+                {
+                    "id": cid,
+                    "name": display_name,
+                    "repo": norm["githubSlug"] or norm["repo"],
+                    "cloneUrl": norm["cloneUrl"],
+                    "subpath": norm["subpath"],
+                    "branch": norm["branch"],
+                    "token": token.strip(),
+                    "builtin": False,
+                }
+            )
+            state["customCatalogs"] = customs
+
+        self.store.update_state(_save_catalog)
 
         scan_result = None
         if auto_scan:
@@ -414,16 +437,17 @@ class SkillService:
         }
 
     def delete_catalog(self, catalog_id: str) -> bool:
-        state = self.store.load_state()
-        customs = state.get("customCatalogs", [])
-        new_customs = [c for c in customs if c.get("id") != catalog_id]
-        if len(new_customs) == len(customs):
-            return False
-        state["customCatalogs"] = new_customs
-        if isinstance(state.get("catalogCache"), dict):
-            state["catalogCache"].pop(catalog_id, None)
-        self.store.save_state(state)
-        return True
+        def _remove(state: dict[str, Any]) -> bool:
+            customs = state.get("customCatalogs", [])
+            new_customs = [c for c in customs if c.get("id") != catalog_id]
+            if len(new_customs) == len(customs):
+                return False
+            state["customCatalogs"] = new_customs
+            if isinstance(state.get("catalogCache"), dict):
+                state["catalogCache"].pop(catalog_id, None)
+            return True
+
+        return bool(self.store.update_state(_remove))
 
     def scan_catalog(
         self,
@@ -477,18 +501,19 @@ class SkillService:
 
         now_iso = datetime.now(timezone.utc).isoformat()
         if catalog_id:
-            state = self.store.load_state()
-            cache = state.setdefault("catalogCache", {})
-            prev = cache.get(catalog_id, {}) if isinstance(cache.get(catalog_id), dict) else {}
-            cache[catalog_id] = {
-                "skills": skills if not error_msg else prev.get("skills", []),
-                "stars": gh_meta.get("stars", prev.get("stars")),
-                "updatedAt": gh_meta.get("updatedAt", prev.get("updatedAt")),
-                "webUrl": norm["webUrl"],
-                "lastScannedAt": now_iso,
-                "error": error_msg,
-            }
-            self.store.save_state(state)
+            def _save_scan(state: dict[str, Any]) -> None:
+                cache = state.setdefault("catalogCache", {})
+                prev = cache.get(catalog_id, {}) if isinstance(cache.get(catalog_id), dict) else {}
+                cache[catalog_id] = {
+                    "skills": skills if not error_msg else prev.get("skills", []),
+                    "stars": gh_meta.get("stars", prev.get("stars")),
+                    "updatedAt": gh_meta.get("updatedAt", prev.get("updatedAt")),
+                    "webUrl": norm["webUrl"],
+                    "lastScannedAt": now_iso,
+                    "error": error_msg,
+                }
+
+            self.store.update_state(_save_scan)
 
         installed_lookup = self._build_installed_lookup()
         enriched = [self._enrich_catalog_skill(sk, installed_lookup) for sk in skills]
@@ -606,7 +631,12 @@ class SkillService:
                         continue
                     shutil.rmtree(dst_dir)
 
-                shutil.copytree(src_dir, dst_dir, ignore=shutil.ignore_patterns(".git"))
+                shutil.copytree(
+                    src_dir,
+                    dst_dir,
+                    ignore=shutil.ignore_patterns(".git"),
+                    ignore_dangling_symlinks=True,
+                )
                 installed.append(
                     {
                         "name": folder_name,
@@ -800,7 +830,10 @@ class SkillService:
             if rel_path == ".":
                 rel_path = ""
             skill_md = skill_dir / "SKILL.md"
-            raw = skill_md.read_text(encoding="utf-8", errors="replace")
+            try:
+                raw = skill_md.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
             fallback = skill_dir.name if rel_path else Path(repo_label).name
             parsed = parse_skill_markdown(raw, fallback_name=fallback)
             folder_name = self._sanitize_folder_name(parsed["name"] or fallback)

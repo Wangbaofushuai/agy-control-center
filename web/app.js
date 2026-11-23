@@ -68,6 +68,40 @@
   }
 
   const mcpBridge = isMcpAppMode ? new McpAppBridge() : null;
+  const API_TOKEN_STORAGE_KEY = "agy-cc-api-token";
+
+  function getStoredApiToken() {
+    try {
+      return (localStorage.getItem(API_TOKEN_STORAGE_KEY) || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  function setStoredApiToken(token) {
+    try {
+      const clean = String(token || "").trim();
+      if (clean) localStorage.setItem(API_TOKEN_STORAGE_KEY, clean);
+      else localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+    } catch {}
+  }
+
+  function openApiTokenModal(isUnauthorized = false) {
+    if (isMcpAppMode) return;
+    const dlg = $("#modalApiToken");
+    const desc = $("#apiTokenModalDesc");
+    if (desc) {
+      desc.textContent = isUnauthorized
+        ? "服务器已启用 API Token 保护，或当前保存的 Token 无效，请输入正确的访问令牌后继续。"
+        : "若服务器通过 sm 菜单或 AGY_API_TOKEN 启用了访问保护，请在此输入对应 Token（仅保存在当前浏览器本地）。";
+    }
+    const input = $("#webApiTokenInput");
+    if (input && (!dlg || !dlg.open)) {
+      input.value = getStoredApiToken();
+    }
+    openModal("modalApiToken");
+    if (input) input.focus();
+  }
 
   async function apiRequest(method, path, body = null, query = null) {
     if (isMcpAppMode && mcpBridge) {
@@ -83,6 +117,10 @@
       if (qs) url += `?${qs}`;
     }
     const opts = { method, headers: {} };
+    const apiToken = getStoredApiToken();
+    if (apiToken) {
+      opts.headers["X-API-Token"] = apiToken;
+    }
     if (body !== null) {
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
@@ -90,7 +128,12 @@
     const resp = await fetch(url, opts);
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      throw new Error(data.error || `请求失败 (${resp.status})`);
+      const err = new Error(data.error || `请求失败 (${resp.status})`);
+      err.status = resp.status;
+      if (resp.status === 401) {
+        openApiTokenModal(true);
+      }
+      throw err;
     }
     return data;
   }
@@ -197,6 +240,15 @@
 
   function populateProjectOnlySelect(selectEl, preferredPath = null) {
     selectEl.innerHTML = "";
+    if (!state.projects.length) {
+      const emptyOpt = document.createElement("option");
+      emptyOpt.value = "";
+      emptyOpt.textContent = "暂无项目（请先在左侧「项目」页添加）";
+      emptyOpt.disabled = true;
+      emptyOpt.selected = true;
+      selectEl.appendChild(emptyOpt);
+      return;
+    }
     for (const proj of state.projects) {
       const opt = document.createElement("option");
       opt.value = proj.path;
@@ -235,14 +287,16 @@
       state.installedSkills = skillsData.skills || [];
       state.catalogs = catalogData.catalogs || [];
 
-      if (!state.activeCatalogId && state.catalogs.length > 0) {
-        state.activeCatalogId = state.catalogs[0].id;
+      if (!state.activeCatalogId || !state.catalogs.some((c) => c.id === state.activeCatalogId)) {
+        state.activeCatalogId = state.catalogs[0]?.id || null;
       }
 
       updateSidebarMeta();
       renderCurrentView();
     } catch (err) {
-      showToast(`加载数据失败: ${err.message}`, "error");
+      if (err?.status !== 401) {
+        showToast(`加载数据失败: ${err.message}`, "error");
+      }
     }
   }
 
@@ -262,6 +316,9 @@
     state.installedSkills = skillsData.skills || [];
     state.catalogs = catalogData.catalogs || [];
     state.projects = skillsData.projects || state.projects;
+    if (!state.activeCatalogId || !state.catalogs.some((c) => c.id === state.activeCatalogId)) {
+      state.activeCatalogId = state.catalogs[0]?.id || null;
+    }
     updateSidebarMeta();
     renderInstalledSkills();
     renderCatalogView();
@@ -277,6 +334,7 @@
     }
     if (isMcpAppMode) {
       $("#modeBadge").textContent = "MCP App 内嵌模式";
+      $("#btnOpenApiToken")?.classList.add("hidden");
     }
   }
 
@@ -325,6 +383,12 @@
   }
 
   function renderMcpList() {
+    if (
+      state.mcpScopeFilter.startsWith("project:") &&
+      !state.projects.some((p) => `project:${p.path}` === state.mcpScopeFilter)
+    ) {
+      state.mcpScopeFilter = "all";
+    }
     renderScopeFilterBar($("#mcpScopeTabs"), state.mcpScopeFilter, (key) => {
       state.mcpScopeFilter = key;
       renderMcpList();
@@ -698,6 +762,12 @@
   // VIEW 2: Installed Skills
   // =========================================================================
   function renderInstalledSkills() {
+    if (
+      state.skillScopeFilter.startsWith("project:") &&
+      !state.projects.some((p) => `project:${p.path}` === state.skillScopeFilter)
+    ) {
+      state.skillScopeFilter = "all";
+    }
     renderScopeFilterBar($("#skillScopeTabs"), state.skillScopeFilter, (key) => {
       state.skillScopeFilter = key;
       renderInstalledSkills();
@@ -869,7 +939,7 @@
           try {
             await apiRequest("DELETE", "/api/catalogs", null, { id: cat.id });
             if (state.activeCatalogId === cat.id) {
-              state.activeCatalogId = state.catalogs[0]?.id || null;
+              state.activeCatalogId = state.catalogs.find((c) => c.id !== cat.id)?.id || null;
             }
             showToast("已移除目录来源", "success");
             await refreshSkills();
@@ -1094,10 +1164,18 @@
     const scope = $('input[name="installScope"]:checked')?.value || "global";
     const projRow = $("#installProjectRow");
     projRow.classList.toggle("hidden", scope !== "project");
+    const selectedProject = $("#installProjectSelect").value;
+    const confirmBtn = $("#btnConfirmInstallSkill");
+    if (scope === "project" && !selectedProject) {
+      $("#installTargetPathPreview").textContent = "请先在左侧「项目」页添加项目目录后再安装到项目。";
+      if (confirmBtn) confirmBtn.disabled = true;
+      return;
+    }
+    if (confirmBtn) confirmBtn.disabled = false;
     const targetPath =
       scope === "global"
         ? state.overview?.globalSkillsDir || "~/.gemini/config/skills"
-        : `${$("#installProjectSelect").value || "<项目>"}/.agents/skills`;
+        : `${selectedProject}/.agents/skills`;
     $("#installTargetPathPreview").textContent = `目标目录：${targetPath}`;
   }
 
@@ -1223,7 +1301,11 @@
 
     // MCP actions
     $("#btnNewMcp").addEventListener("click", () => openMcpEditor(null));
-    $("#btnRefreshMcp").addEventListener("click", () => refreshMcp().then(() => showToast("已刷新", "success")));
+    $("#btnRefreshMcp").addEventListener("click", () =>
+      refreshMcp()
+        .then(() => showToast("已刷新", "success"))
+        .catch((err) => showToast(err.message, "error"))
+    );
     $("#btnBackToMcp").addEventListener("click", () => switchView("mcp"));
     $("#btnCancelMcpEdit").addEventListener("click", () => switchView("mcp"));
 
@@ -1385,7 +1467,11 @@
     });
 
     // Skills actions
-    $("#btnRefreshSkills").addEventListener("click", () => refreshSkills().then(() => showToast("已刷新技能列表", "success")));
+    $("#btnRefreshSkills").addEventListener("click", () =>
+      refreshSkills()
+        .then(() => showToast("已刷新技能列表", "success"))
+        .catch((err) => showToast(err.message, "error"))
+    );
     $("#btnGoCatalogFromSkills").addEventListener("click", () => switchView("catalog"));
     $("#btnConfirmTransferSkill").addEventListener("click", async () => {
       const sk = state.transferContext;
@@ -1523,6 +1609,10 @@
       if (!ctx) return;
       const scope = $('input[name="installScope"]:checked')?.value || "global";
       const projectPath = scope === "project" ? $("#installProjectSelect").value : null;
+      if (scope === "project" && !projectPath) {
+        showToast("请先在左侧「项目」页添加项目目录", "error");
+        return;
+      }
       const overwrite = $("#installOverwriteCheck").checked;
       const btn = $("#btnConfirmInstallSkill");
       btn.disabled = true;
@@ -1661,6 +1751,28 @@
     $("#btnClearSkillRepos").addEventListener("click", () =>
       runClearCache("skill_repos", "确定清理本地 Skill Git 仓库克隆缓存吗？（保留来源列表，下次扫描会重新浅克隆）")
     );
+
+    // API Token Modal
+    const submitApiToken = async () => {
+      setStoredApiToken($("#webApiTokenInput").value);
+      closeModal("modalApiToken");
+      await loadAllData();
+    };
+    $("#btnOpenApiToken")?.addEventListener("click", () => openApiTokenModal(false));
+    $("#btnSaveWebApiToken")?.addEventListener("click", submitApiToken);
+    $("#btnClearWebApiToken")?.addEventListener("click", async () => {
+      $("#webApiTokenInput").value = "";
+      setStoredApiToken("");
+      closeModal("modalApiToken");
+      showToast("已清除本地保存的 API Token", "info");
+      await loadAllData();
+    });
+    $("#webApiTokenInput")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void submitApiToken();
+      }
+    });
   }
 
   // Bootstrap

@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/Wangbaofushuai/agy-control-center/m
 如需自定义端口、安装目录或开启访问 Token：
 
 ```bash
-PORT=9090 AGY_API_TOKEN=your-secret curl -fsSL https://raw.githubusercontent.com/Wangbaofushuai/agy-control-center/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Wangbaofushuai/agy-control-center/main/install.sh | PORT=9090 AGY_API_TOKEN=your-secret bash
 ```
 
 ### `sm` 快捷管理命令

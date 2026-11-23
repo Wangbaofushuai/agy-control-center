@@ -31,8 +31,16 @@ load_env() {
   LOG_FILE="${INSTALL_DIR}/data/service.log"
 }
 
+run_install_cmd() {
+  if [[ -w "${INSTALL_DIR}" ]]; then
+    "$@"
+  else
+    ${SUDO} "$@"
+  fi
+}
+
 save_env() {
-  mkdir -p "${INSTALL_DIR}"
+  run_install_cmd mkdir -p "${INSTALL_DIR}"
   local tmp_env
   tmp_env="$(mktemp)"
   cat > "${tmp_env}" <<EOF
@@ -46,8 +54,11 @@ AGY_CONFIG_DIR=${AGY_CONFIG_DIR:-${HOME}/.gemini/config}
 RUN_USER=${RUN_USER:-$(id -un)}
 RUN_HOME=${RUN_HOME:-${HOME}}
 EOF
-  mv "${tmp_env}" "${ENV_FILE}"
-  chmod 600 "${ENV_FILE}"
+  run_install_cmd mv "${tmp_env}" "${ENV_FILE}"
+  run_install_cmd chmod 600 "${ENV_FILE}"
+  if [[ "${EUID:-$(id -u)}" -eq 0 || ! -w "${INSTALL_DIR}" ]]; then
+    ${SUDO} chown "${RUN_USER}:${RUN_USER}" "${ENV_FILE}" 2>/dev/null || true
+  fi
 }
 
 RED='\033[0;31m'
@@ -100,8 +111,8 @@ get_pid() {
 get_git_version() {
   if [[ -d "${INSTALL_DIR}/.git" ]]; then
     local hash branch
-    hash="$(git -C "${INSTALL_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
-    branch="$(git -C "${INSTALL_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "${BRANCH}")"
+    hash="$(git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+    branch="$(git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "${BRANCH}")"
     echo "${branch}@${hash}"
   else
     echo "local"
@@ -134,14 +145,19 @@ cmd_start() {
   fi
 
   local i
-  for i in $(seq 1 15); do
+  for i in $(seq 1 20); do
+    if ! is_running; then
+      sleep 0.25
+      continue
+    fi
     if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${PORT}/api/health', timeout=1)" >/dev/null 2>&1; then
       printf "${GREEN}服务启动成功！${NC} (PID: %s, 监听 %s:%s)\n" "$(get_pid)" "${HOST}" "${PORT}"
       return 0
     fi
     sleep 0.25
   done
-  printf "${YELLOW}已发出启动命令，请用 sm logs 检查运行状态。${NC}\n"
+  printf "${RED}服务未能正常就绪（可能端口 %s 已被占用），请用 sm logs 检查日志。${NC}\n" "${PORT}"
+  return 1
 }
 
 cmd_stop() {
@@ -219,16 +235,19 @@ cmd_update() {
     return 1
   fi
   local before after
-  before="$(git -C "${INSTALL_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+  before="$(git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
   printf "${CYAN}正在从 Git 仓库同步最新版本 (%s)...${NC}\n" "${BRANCH}"
-  git -C "${INSTALL_DIR}" fetch origin "${BRANCH}" --depth 1
-  git -C "${INSTALL_DIR}" reset --hard "origin/${BRANCH}"
-  chmod +x \
+  run_install_cmd git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" fetch origin "${BRANCH}" --depth 1
+  run_install_cmd git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" reset --hard "origin/${BRANCH}"
+  run_install_cmd chmod +x \
     "${INSTALL_DIR}/start.sh" \
     "${INSTALL_DIR}/install.sh" \
     "${INSTALL_DIR}/scripts/sm.sh" \
     "${INSTALL_DIR}/plugins/agy-control-center/scripts/mcp_server.py"
-  after="$(git -C "${INSTALL_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+  if [[ "${EUID:-$(id -u)}" -eq 0 || ! -w "${INSTALL_DIR}" ]]; then
+    ${SUDO} chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}" 2>/dev/null || true
+  fi
+  after="$(git -c "safe.directory=${INSTALL_DIR}" -C "${INSTALL_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
 
   if [[ "${before}" == "${after}" ]]; then
     printf "${GREEN}当前已是最新版本 (%s)。${NC}\n" "${after}"
@@ -242,15 +261,21 @@ cmd_update() {
 cmd_logs() {
   load_env
   if use_systemd; then
-    printf "${DIM}按 Ctrl+C 退出实时日志${NC}\n"
-    ${SUDO} journalctl -u "${SERVICE_NAME}" -n 60 -f
+    printf "${DIM}按 Ctrl+C 返回管理菜单${NC}\n"
+    (
+      trap 'exit 0' INT
+      ${SUDO} journalctl -u "${SERVICE_NAME}" -n 60 -f
+    ) || true
   else
     if [[ ! -f "${LOG_FILE}" ]]; then
       printf "${YELLOW}暂无日志文件: %s${NC}\n" "${LOG_FILE}"
       return 0
     fi
-    printf "${DIM}最近 60 行日志 (%s)，按 Ctrl+C 退出${NC}\n" "${LOG_FILE}"
-    tail -n 60 -f "${LOG_FILE}"
+    printf "${DIM}最近 60 行日志 (%s)，按 Ctrl+C 返回管理菜单${NC}\n" "${LOG_FILE}"
+    (
+      trap 'exit 0' INT
+      tail -n 60 -f "${LOG_FILE}"
+    ) || true
   fi
 }
 
@@ -270,6 +295,11 @@ cmd_config_port_token() {
   if [[ "${new_token}" == "-" ]]; then
     AGY_API_TOKEN=""
   elif [[ -n "${new_token}" ]]; then
+    local token_re='^[A-Za-z0-9._:@/+=-]+$'
+    if ! [[ "${new_token}" =~ ${token_re} ]]; then
+      printf "${RED}Token 仅支持字母、数字及 . _ : @ / + = -，不能包含空格或引号/\$等特殊字符${NC}\n"
+      return 1
+    fi
     AGY_API_TOKEN="${new_token}"
   fi
   save_env
@@ -332,13 +362,13 @@ show_menu() {
     read -r -p "请输入选项 [0-7]: " choice || break
     echo ""
     case "${choice}" in
-      1) cmd_toggle ;;
-      2) cmd_restart ;;
-      3) cmd_update ;;
-      4) cmd_status ;;
-      5) cmd_logs ;;
-      6) cmd_config_port_token ;;
-      7) cmd_uninstall; break ;;
+      1) cmd_toggle || true ;;
+      2) cmd_restart || true ;;
+      3) cmd_update || true ;;
+      4) cmd_status || true ;;
+      5) cmd_logs || true ;;
+      6) cmd_config_port_token || true ;;
+      7) cmd_uninstall || true; [[ -d "${INSTALL_DIR}" ]] || break ;;
       0|q|Q) break ;;
       *) printf "${RED}无效选项，请输入 0-7${NC}\n" ;;
     esac

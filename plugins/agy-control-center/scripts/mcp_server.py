@@ -47,8 +47,8 @@ def build_inlined_ui_html() -> str:
     """Bundle web/index.html, styles.css, and app.js into a single MCP App HTML file."""
     web_dir = REPO_ROOT / "web"
     html = (web_dir / "index.html").read_text(encoding="utf-8")
-    css = (web_dir / "styles.css").read_text(encoding="utf-8")
-    js = (web_dir / "app.js").read_text(encoding="utf-8")
+    css = (web_dir / "styles.css").read_text(encoding="utf-8").replace("</style", "<\\/style")
+    js = (web_dir / "app.js").read_text(encoding="utf-8").replace("</script", "<\\/script")
 
     html = html.replace(
         '<link rel="stylesheet" href="/styles.css" />',
@@ -177,7 +177,7 @@ class ControlCenterMcpServer:
             },
             {
                 "name": "list_mcp_servers",
-                "description": "List all configured MCP servers across global (~/.gemini/config/mcp_config.json) and discovered project workspaces (.agents/mcp_config.json).",
+                "description": "List all configured MCP servers across global (~/.gemini/config/mcp_config.json) and discovered project workspaces (.agents/plugins/project-mcp/mcp_config.json).",
                 "inputSchema": {"type": "object", "properties": {}},
             },
             {
@@ -464,22 +464,68 @@ class ControlCenterMcpServer:
         return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
+def _read_stdio_message(stdin_buf: Any) -> tuple[dict[str, Any] | None, str]:
+    """Read one JSON-RPC message in either newline-delimited or Content-Length framing."""
+    while True:
+        first_line = stdin_buf.readline()
+        if not first_line:
+            return None, "jsonl"
+        stripped = first_line.strip()
+        if not stripped:
+            continue
+
+        lower = stripped.lower()
+        if lower.startswith(b"content-length:"):
+            content_length: int | None = None
+            line = first_line
+            while line and line.strip():
+                if b":" in line:
+                    k, v = line.split(b":", 1)
+                    if k.strip().lower() == b"content-length":
+                        try:
+                            content_length = int(v.strip())
+                        except ValueError:
+                            content_length = None
+                line = stdin_buf.readline()
+            if not content_length or content_length <= 0:
+                continue
+            payload = stdin_buf.read(content_length)
+            if not payload:
+                return None, "lsp"
+            try:
+                return json.loads(payload.decode("utf-8")), "lsp"
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+
+        try:
+            return json.loads(stripped.decode("utf-8")), "jsonl"
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+
+
+def _write_stdio_message(stdout_buf: Any, response: dict[str, Any], framing: str) -> None:
+    payload = json.dumps(response, ensure_ascii=False).encode("utf-8")
+    if framing == "lsp":
+        header = f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
+        stdout_buf.write(header + payload)
+    else:
+        stdout_buf.write(payload + b"\n")
+    stdout_buf.flush()
+
+
 def run_stdio_loop() -> int:
     store = ConfigStore()
     server = ControlCenterMcpServer(ControlCenterApp(store))
+    stdin_buf = sys.stdin.buffer
+    stdout_buf = sys.stdout.buffer
 
-    for raw_line in sys.stdin:
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    while True:
+        msg, framing = _read_stdio_message(stdin_buf)
+        if msg is None:
+            break
         response = server.handle_request(msg)
         if response is not None:
-            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            _write_stdio_message(stdout_buf, response, framing)
     return 0
 
 

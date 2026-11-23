@@ -605,6 +605,133 @@ class ControlCenterTestCase(unittest.TestCase):
                 ["bash", str(sm_sh), "stop"], env=env, capture_output=True, text=True, timeout=10
             )
 
+    def test_concurrent_state_updates_preserve_all_writes(self) -> None:
+        dirs = []
+        for idx in range(8):
+            d = self.root / f"proj_{idx}"
+            d.mkdir()
+            dirs.append(d)
+
+        errors: list[Exception] = []
+
+        def worker(p: Path, label: str) -> None:
+            try:
+                self.store.add_custom_project(str(p), label)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(d, f"P{i}"))
+            for i, d in enumerate(dirs)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+
+        self.assertEqual(errors, [])
+        saved_paths = {p["path"] for p in self.store.discover_projects()}
+        for d in dirs:
+            self.assertIn(str(d.resolve()), saved_paths)
+
+    def test_legacy_dot_agent_skill_detail_transfer_and_delete(self) -> None:
+        legacy_dir = self.proj_a / ".agent" / "skills" / "legacy-helper"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "SKILL.md").write_text(
+            "---\nname: legacy-helper\ndescription: Legacy skill.\n---\n# Legacy\n",
+            encoding="utf-8",
+        )
+
+        installed = self.skills.list_installed_skills()["skills"]
+        self.assertIn("legacy-helper", [s["folderName"] for s in installed])
+
+        detail = self.skills.get_installed_skill_detail("project", str(self.proj_a), "legacy-helper")
+        self.assertEqual(detail["name"], "legacy-helper")
+        self.assertIn("# Legacy", detail["markdown"])
+
+        self.skills.transfer_installed_skill(
+            src_scope="project",
+            src_project_path=str(self.proj_a),
+            folder_name="legacy-helper",
+            dst_scope="global",
+            dst_project_path=None,
+            move=False,
+        )
+        self.assertTrue((self.global_cfg / "skills" / "legacy-helper" / "SKILL.md").is_file())
+
+        self.assertTrue(self.skills.delete_installed_skill("project", str(self.proj_a), "legacy-helper"))
+        self.assertFalse(legacy_dir.exists())
+
+    def test_cache_ignores_active_tmp_staging_dirs(self) -> None:
+        repos_root = self.data_dir / "cache" / "repos"
+        real_repo = repos_root / "deadbeef"
+        tmp_repo = repos_root / ".tmp-in-flight-clone"
+        real_repo.mkdir(parents=True)
+        tmp_repo.mkdir(parents=True)
+        (real_repo / "SKILL.md").write_text("# cached", encoding="utf-8")
+        (tmp_repo / "SKILL.md").write_text("# cloning", encoding="utf-8")
+
+        app = ControlCenterApp(self.store)
+        status = app.get_cache_status()
+        self.assertEqual(status["skillRepoCache"]["repoCount"], 1)
+
+        res = app.clear_cache("skill_repos")
+        self.assertEqual(res["removedCount"], 1)
+        self.assertFalse(real_repo.exists())
+        self.assertTrue(tmp_repo.exists())
+
+    def test_resolve_stdio_command_uses_target_user_home(self) -> None:
+        fake_home = self.root / "target_user"
+        volta_bin = fake_home / ".volta" / "bin"
+        volta_bin.mkdir(parents=True)
+        fake_npx = volta_bin / "fake-npx"
+        fake_npx.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+        fake_npx.chmod(0o755)
+
+        resolved, warn = resolve_stdio_command(
+            "fake-npx",
+            system_path="/nonexistent",
+            user_path="",
+            user_home=fake_home,
+        )
+        self.assertEqual(resolved, str(fake_npx))
+        self.assertIn("绝对路径", warn or "")
+
+    def test_mcp_stdio_supports_jsonl_and_content_length_framing(self) -> None:
+        script = REPO_ROOT / "plugins" / "agy-control-center" / "scripts" / "mcp_server.py"
+        env = {
+            **dict(subprocess.os.environ),
+            "AGY_CONFIG_DIR": str(self.global_cfg),
+            "AGY_DATA_DIR": str(self.data_dir),
+        }
+        msg1 = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode("utf-8")
+        msg2 = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}}).encode("utf-8")
+        stdin_payload = (
+            msg1 + b"\n" + f"Content-Length: {len(msg2)}\r\n\r\n".encode("ascii") + msg2
+        )
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            input=stdin_payload,
+            capture_output=True,
+            env=env,
+            timeout=10,
+            check=True,
+        )
+        out = proc.stdout
+        first_nl = out.index(b"\n")
+        resp1 = json.loads(out[:first_nl].decode("utf-8"))
+        self.assertEqual(resp1["id"], 1)
+        self.assertEqual(resp1["result"]["serverInfo"]["name"], "agy-control-center")
+
+        rest = out[first_nl + 1 :]
+        self.assertTrue(rest.startswith(b"Content-Length:"))
+        header, body = rest.split(b"\r\n\r\n", 1)
+        declared_len = int(header.split(b":", 1)[1].strip())
+        self.assertEqual(len(body), declared_len)
+        resp2 = json.loads(body.decode("utf-8"))
+        self.assertEqual(resp2["id"], 2)
+        self.assertEqual(resp2["result"], {})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -73,6 +74,7 @@ class ConfigStore:
         self.current_workspace = Path(
             current_workspace or REPO_ROOT
         ).expanduser().resolve()
+        self._state_lock = threading.RLock()
 
     @property
     def state_file(self) -> Path:
@@ -164,18 +166,35 @@ class ConfigStore:
             "customCatalogs": [],
             "catalogCache": {},
         }
-        try:
-            data = self.read_json(self.state_file, default)
-            if not isinstance(data, dict):
+        with self._state_lock:
+            try:
+                data = self.read_json(self.state_file, default)
+                if not isinstance(data, dict):
+                    return default
+                for key, val in default.items():
+                    data.setdefault(key, val)
+                return data
+            except Exception:
                 return default
-            for key, val in default.items():
-                data.setdefault(key, val)
-            return data
-        except Exception:
-            return default
 
     def save_state(self, state: dict[str, Any]) -> None:
-        self.write_json_atomic(self.state_file, state, private=True)
+        with self._state_lock:
+            self.write_json_atomic(self.state_file, state, private=True)
+
+    def update_state(self, mutator: Callable[[dict[str, Any]], Any]) -> Any:
+        """Atomically load, mutate, and persist state.json under a re-entrant lock."""
+        with self._state_lock:
+            state = self.load_state()
+            result = mutator(state)
+            self.save_state(state)
+            return result
+
+    @property
+    def target_user_home(self) -> Path:
+        """Infer the home directory corresponding to global_config_dir (~/.gemini/config)."""
+        if self.global_config_dir.name == "config" and self.global_config_dir.parent.name == ".gemini":
+            return self.global_config_dir.parent.parent
+        return Path.home()
 
     def discover_projects(self) -> list[dict[str, Any]]:
         """Discover Antigravity projects from ~/.gemini/config/projects + custom projects."""
@@ -268,37 +287,37 @@ class ConfigStore:
         if not resolved.exists() or not resolved.is_dir():
             raise ValueError(f"目录不存在: {resolved}")
 
-        state = self.load_state()
-        custom_list = state.setdefault("customProjects", [])
-        for existing in custom_list:
-            if str(Path(existing.get("path", "")).expanduser().resolve()) == str(resolved):
-                if name.strip():
-                    existing["name"] = name.strip()
-                    self.save_state(state)
-                return self._find_project_or_fallback(str(resolved))
+        def _mutate(state: dict[str, Any]) -> None:
+            custom_list = state.setdefault("customProjects", [])
+            for existing in custom_list:
+                if str(Path(existing.get("path", "")).expanduser().resolve()) == str(resolved):
+                    if name.strip():
+                        existing["name"] = name.strip()
+                    return
+            custom_list.append(
+                {
+                    "id": f"custom-{resolved.name}-{abs(hash(str(resolved))) % 100000}",
+                    "name": name.strip() or resolved.name or str(resolved),
+                    "path": str(resolved),
+                }
+            )
 
-        entry = {
-            "id": f"custom-{resolved.name}-{abs(hash(str(resolved))) % 100000}",
-            "name": name.strip() or resolved.name or str(resolved),
-            "path": str(resolved),
-        }
-        custom_list.append(entry)
-        self.save_state(state)
+        self.update_state(_mutate)
         return self._find_project_or_fallback(str(resolved))
 
     def remove_custom_project(self, path_str: str) -> bool:
         resolved = str(Path(path_str).expanduser().resolve())
-        state = self.load_state()
-        before = len(state.get("customProjects", []))
-        state["customProjects"] = [
-            item
-            for item in state.get("customProjects", [])
-            if str(Path(item.get("path", "")).expanduser().resolve()) != resolved
-        ]
-        if len(state["customProjects"]) == before:
-            return False
-        self.save_state(state)
-        return True
+
+        def _mutate(state: dict[str, Any]) -> bool:
+            before = len(state.get("customProjects", []))
+            state["customProjects"] = [
+                item
+                for item in state.get("customProjects", [])
+                if str(Path(item.get("path", "")).expanduser().resolve()) != resolved
+            ]
+            return len(state["customProjects"]) != before
+
+        return bool(self.update_state(_mutate))
 
     def resolve_scope_target(
         self, scope: str, project_path: str | None = None

@@ -23,6 +23,7 @@ def resolve_stdio_command(
     system_path: str | None = None,
     user_path: str | None = None,
     extra_dirs: list[Path] | None = None,
+    user_home: Path | None = None,
 ) -> tuple[str, str | None]:
     """Check if a stdio command is reachable by headless Antigravity daemons.
 
@@ -60,22 +61,26 @@ def resolve_stdio_command(
     if extra_dirs is not None:
         search_dirs.extend(extra_dirs)
     else:
-        home = Path.home()
+        home = user_home or Path.home()
         search_dirs.extend(
             [
                 home / ".local" / "bin",
                 home / ".cargo" / "bin",
                 home / ".bun" / "bin",
                 home / ".local" / "share" / "pnpm",
+                home / ".volta" / "bin",
+                home / ".asdf" / "shims",
+                home / ".local" / "share" / "mise" / "shims",
                 home / ".pyenv" / "shims",
+                Path("/snap/bin"),
             ]
         )
-        nvm_versions = home / ".nvm" / "versions" / "node"
-        if nvm_versions.is_dir():
-            for ver_dir in sorted(nvm_versions.iterdir(), reverse=True):
-                bin_dir = ver_dir / "bin"
-                if bin_dir.is_dir():
-                    search_dirs.append(bin_dir)
+        for node_root in (home / ".nvm" / "versions" / "node", home / ".fnm" / "node-versions"):
+            if node_root.is_dir():
+                for ver_dir in sorted(node_root.iterdir(), reverse=True):
+                    for candidate_bin in (ver_dir / "bin", ver_dir / "installation" / "bin"):
+                        if candidate_bin.is_dir():
+                            search_dirs.append(candidate_bin)
 
     for directory in search_dirs:
         candidate = directory / cmd
@@ -461,7 +466,9 @@ class McpService:
             )
             if not command_str:
                 raise ValueError("本地 Stdio MCP 服务器必须填写启动命令 (command)")
-            resolved_cmd, cmd_warning = resolve_stdio_command(command_str)
+            resolved_cmd, cmd_warning = resolve_stdio_command(
+                command_str, user_home=self.store.target_user_home
+            )
             if cmd_warning:
                 warnings.append(cmd_warning)
             result["command"] = resolved_cmd
